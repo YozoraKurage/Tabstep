@@ -113,7 +113,13 @@ namespace Yozolab.Tabstep
             var main = EditorGUIUtility.GetMainWindowPosition();
             var plausible = Rect.MinMaxRect(main.xMin - 4096, main.yMin - 4096,
                 main.xMax + 4096, main.yMax + 4096);
-            if (!plausible.Contains(screenPoint)) screenPoint = main.center;
+            if (!plausible.Contains(screenPoint))
+            {
+                // Worth a trace: it means every mouse-position source failed.
+                Debug.LogWarning($"[Tabstep] Shelf summon point {screenPoint} looked invalid; " +
+                                 "falling back to the main window center.");
+                screenPoint = main.center;
+            }
 
             var window = Instance;
             var origin = screenPoint - new Vector2(40f, 12f); // lands under the cursor
