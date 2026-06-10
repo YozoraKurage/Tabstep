@@ -1,5 +1,6 @@
 using System.Collections.Generic;
 using UnityEditor;
+using UnityEditor.ShortcutManagement;
 using UnityEditorInternal;
 using UnityEngine;
 using Object = UnityEngine.Object;
@@ -7,14 +8,18 @@ using Object = UnityEngine.Object;
 namespace Yozolab.Tabstep
 {
     /// <summary>
-    /// The Tabstep Shelf: a small borderless float window that parks objects mid-flight.
-    /// Drop assets (or scene objects) on it, then drag them back out onto another tab,
-    /// an Inspector object field, the scene — anywhere Unity drag &amp; drop reaches.
+    /// The Tabstep Shelf: a small borderless float window that parks objects
+    /// mid-flight. Drop assets (or scene objects) on it, then drag them back out onto
+    /// another tab, an Inspector object field, the scene — anywhere Unity drag &amp;
+    /// drop reaches.
     ///
-    /// Shown with ShowPopup so it never steals focus while switching tabs underneath it.
-    /// Items survive domain reloads via window serialization; the editor-restart ghost
-    /// a popup window would otherwise leave behind is detected via SessionState (which
-    /// is cleared on restart, matching the shelf's "temporary" semantics) and closed.
+    /// Shown with ShowPopup: an independent frameless window floating above the
+    /// editor; its header row moves it (anchored in screen space, so the drag stays
+    /// glued to the cursor). Ctrl+Shift+X — a global, rebindable shortcut — summons
+    /// it to the mouse and drops the current selection onto it. Items survive domain
+    /// reloads via window serialization; a ghost popup restored at editor startup is
+    /// detected via SessionState (which is cleared on restart, matching the shelf's
+    /// "temporary" semantics) and closed.
     ///
     /// With the One-Shot preference on, dragging an item out consumes it: the item
     /// disappears when the drag leaves the shelf and comes back only if the same drag
@@ -36,6 +41,10 @@ namespace Yozolab.Tabstep
         Vector2 _scroll;
         ShelfItem _mouseDownItem;
         bool _dragAllArmed;
+        // Header drag-to-move state, anchored in screen space (see HandleWindowDrag).
+        bool _draggingWindow;
+        Vector2 _dragStartMouseScreen;
+        Vector2 _dragStartWindowOrigin;
         // One-shot bookkeeping: the item(s) consumed by the current drag-out, restored
         // if the very same drag re-enters the shelf and drops.
         readonly List<ShelfItem> _draggedOut = new List<ShelfItem>();
@@ -71,16 +80,69 @@ namespace Yozolab.Tabstep
             var window = Instance;
             if (window == null)
             {
-                // The alive flag must be up before CreateInstance: OnEnable runs inside
-                // it, and an unset flag reads as "ghost from a saved layout" — which
-                // would close the shelf the moment it appears.
-                SessionState.SetBool(AliveKey, true);
-                window = CreateInstance<TabstepShelfWindow>();
+                window = CreateNew();
                 window.PositionNear(anchor);
-                window.ShowPopup();
             }
             window.Repaint();
             return window;
+        }
+
+        /// <summary>
+        /// The global Ctrl+Shift+X gesture: brings the shelf (existing or new) to the
+        /// mouse and drops the current selection onto it. Rebindable in the Shortcut
+        /// Manager; works no matter which editor window has focus.
+        /// </summary>
+        [Shortcut("Tabstep/Summon Shelf", KeyCode.X, ShortcutModifiers.Action | ShortcutModifiers.Shift)]
+        static void SummonShortcut()
+        {
+            var window = SummonAt(GlobalMousePosition());
+            if (Selection.objects.Length > 0)
+                window.AddObjects(Selection.objects);
+        }
+
+        /// <summary>Opens the shelf at (or moves it to) a screen point, keeping its size.</summary>
+        public static TabstepShelfWindow SummonAt(Vector2 screenPoint)
+        {
+            var window = Instance;
+            var origin = screenPoint - new Vector2(40f, 12f); // header lands under the cursor
+            if (window == null)
+            {
+                window = CreateNew();
+                window.position = new Rect(origin, DefaultSize);
+            }
+            else
+            {
+                window.position = new Rect(origin, window.position.size);
+                window.Focus();
+            }
+            window.Repaint();
+            return window;
+        }
+
+        static TabstepShelfWindow CreateNew()
+        {
+            // The alive flag must be up before CreateInstance: OnEnable runs inside
+            // it, and an unset flag reads as "ghost restored at startup" — which
+            // would close the shelf the moment it appears.
+            SessionState.SetBool(AliveKey, true);
+            var window = CreateInstance<TabstepShelfWindow>();
+            // ShowPopup: independent and frameless; it floats above the editor.
+            window.ShowPopup();
+            return window;
+        }
+
+        /// <summary>
+        /// Best available mouse position in screen coordinates. Shortcut handlers run
+        /// during event processing, so Event.current is usually there; the fallbacks
+        /// degrade to the hovered window, then the main window.
+        /// </summary>
+        static Vector2 GlobalMousePosition()
+        {
+            if (Event.current != null)
+                return GUIUtility.GUIToScreenPoint(Event.current.mousePosition);
+            var hovered = mouseOverWindow;
+            if (hovered != null) return hovered.position.center;
+            return EditorGUIUtility.GetMainWindowPosition().center;
         }
 
         public static void Toggle(EditorWindow anchor)
@@ -167,16 +229,39 @@ namespace Yozolab.Tabstep
                 GUIUtility.ExitGUI();
             }
             EditorGUILayout.EndHorizontal();
+            HandleWindowDrag(GUILayoutUtility.GetLastRect());
+        }
 
-            var headerRect = GUILayoutUtility.GetLastRect();
+        /// <summary>
+        /// Dragging the empty part of the header moves the window. Anchored in screen
+        /// space — start point remembered once, each drag re-derives the origin from
+        /// the absolute cursor position — instead of accumulating per-event deltas,
+        /// whose frame of reference shifts under the moving window and jitters.
+        /// </summary>
+        void HandleWindowDrag(Rect headerRect)
+        {
             var e = Event.current;
-            // Dragging the empty part of the header moves the popup window.
-            if (e.type == EventType.MouseDrag && e.button == 0 &&
-                _mouseDownItem == null && !_dragAllArmed &&
-                headerRect.Contains(e.mousePosition - e.delta))
+            switch (e.type)
             {
-                position = new Rect(position.position + e.delta, position.size);
-                e.Use();
+                // Button clicks in the header never get here: the buttons consume
+                // their own MouseDown first.
+                case EventType.MouseDown when e.button == 0 && headerRect.Contains(e.mousePosition):
+                    _draggingWindow = true;
+                    _dragStartMouseScreen = GUIUtility.GUIToScreenPoint(e.mousePosition);
+                    _dragStartWindowOrigin = position.position;
+                    e.Use();
+                    break;
+                case EventType.MouseDrag when _draggingWindow:
+                    var mouseScreen = GUIUtility.GUIToScreenPoint(e.mousePosition);
+                    position = new Rect(
+                        _dragStartWindowOrigin + (mouseScreen - _dragStartMouseScreen),
+                        position.size);
+                    e.Use();
+                    Repaint();
+                    break;
+                case EventType.MouseUp:
+                    _draggingWindow = false;
+                    break;
             }
         }
 
