@@ -9,13 +9,42 @@ search, thumbnails, drag & drop, renaming and context menus all behave exactly
 like the built-in Project window. On top of it, Tabstep adds:
 
 - **Tabs** — open any number of folders side by side. Tabs (including their
-  history) survive domain reloads and editor restarts.
+  history) survive domain reloads and editor restarts. Drag tab headers to
+  reorder them; tabs of same-named folders show their parent name too
+  (`Scripts — Player`), and the `▾` button at the right end lists every tab.
+- **Pinned tabs** — right-click a tab to pin it: it moves to the left edge,
+  shrinks to its folder icon and ignores Ctrl+W / middle-click (closing it
+  explicitly via the context menu still works). Close Others / Close to the
+  Right spare pinned tabs.
+- **Reopen closed tab** — `Ctrl+Shift+T` (or the tab context menu) brings back
+  the last closed tab with its full history; the last 10 are remembered.
 - **Back / forward history per tab** — navigate like a web browser, including
-  with the mouse side (thumb) buttons.
+  with the mouse side (thumb) buttons. Right-click ◀ / ▶ for the full history
+  as a dropdown. Hovering ◀ / ▶ / ▲ while dragging assets spring-loads the
+  navigation, so a drag can walk through the history.
+- **Middle-click opens a new tab** — on a folder in the asset list, on a
+  breadcrumb segment, on ◀ / ▶ / ▲ and on path suggestions, like browser links.
+- **Per-tab search** — each tab remembers its own search filter and restores
+  it when the tab becomes active again. Configurable filter chips next to the
+  search field toggle `t:` filters with one click.
+- **Path autocomplete** — while editing the path (`Ctrl+L`), subfolder
+  suggestions drop down under the bar: `Tab` completes, `↑`/`↓` select,
+  `Enter` goes, clicking a suggestion jumps (middle-click: new tab).
+- **Quick Access** — right-click the `+` button for bookmarked folders *and
+  saved searches* (a filter pinned to the folder it was made in); add either
+  from that menu or from a tab's context menu. Stored per user and per
+  project in `UserSettings/`.
+- **Workspaces** — save the whole tab set (order, pins, histories, searches)
+  under a name via the `▾` dropdown and restore it any time.
+- **Undo asset moves** — moved something onto the wrong tab? *Undo Last Asset
+  Move* in the tab / path-bar context menus puts everything back.
+- **Status bar** — item count of the shown folder plus the selection's count
+  and file size at the bottom (toggleable).
 - **Explorer-style address bar** — back/forward/up buttons, the folder icon and
   the current path as clickable breadcrumb segments in a sunken field (hover
   highlights them; parents that don't fit collapse behind `«`). Click any
-  segment to jump there.
+  segment to jump there, or click the `›` between segments to pick one of that
+  folder's subfolders, exactly like Explorer's chevrons.
 - **One single bar instead of three** — with [Harmony](#harmony-optional-but-recommended)
   available, the embedded browser's own toolbar (create button + search field)
   and its `Assets > ...` path header are removed entirely; the create button
@@ -41,6 +70,38 @@ like the built-in Project window. On top of it, Tabstep adds:
   them as new tabs.
 - **`Assets > Open in Tabstep`** — open the selected folder in a new tab.
 
+## Tabstep Shelf
+
+A small floating tray for objects in transit (`Shelf` button in the navigation
+bar, `Ctrl+Shift+D`, or `YozoLab > Tabstep Shelf`). Park assets or scene
+objects on it, then drag them back out **anywhere Unity drag & drop reaches**:
+another tab's folder, an Inspector object field, the Hierarchy, the Scene view.
+
+- **Getting things onto it** — drop them on the shelf window, drop them on the
+  `▼ Shelf` zone that appears at the right end of the tab bar while you drag
+  assets, or use *Send Selection to Shelf* in a tab's context menu.
+- **`Ctrl+Shift+D` summons it** — a global, rebindable shortcut (Shortcut
+  Manager: *Tabstep/Summon Shelf*, with a built-in fallback while the Tabstep
+  window is focused): the shelf jumps to the mouse position, and whatever
+  assets, folders or scene objects are selected get added to it in the same
+  stroke.
+- **One-shot by default** — dragging an item out consumes it: the shelf is a
+  hand-off, not a copy source. Dragging it back before dropping restores it;
+  the behaviour is toggleable in preferences.
+- **Bulk hand-offs** — the `≡` handle drags every item out in one go, and
+  `→ Tab` moves all asset items straight into the active tab's folder.
+- **Component relay** — drop a component (drag its Inspector header) on the
+  shelf, then right-click it to paste a copy onto the selected GameObjects.
+  Right-click also offers ping / select / copy for every item.
+- **A window like any other** — a regular floating editor window: move it by
+  its title tab, dock it anywhere, and it stays above the main window like
+  every floating Unity window. It is saved into the layout, closes with its
+  Tabstep window (unless pinned with the `Pin` button), and an emptied
+  unpinned shelf closes itself.
+- Items are stored as GUIDs / GlobalObjectIds, so they survive domain reloads
+  and restarts; scene objects resolve while their scene is open and grey out
+  otherwise.
+
 ## Tabstep Inspector (parked)
 
 A tabbed Inspector also exists in the codebase, but it is **temporarily
@@ -53,23 +114,32 @@ without that define none of it is compiled, registered or shown.
 
 Open via `YozoLab > Tabstep`.
 
-| Shortcut                      | Action                                                            |
-| ----------------------------- | ----------------------------------------------------------------- |
-| `Ctrl+T`                      | New tab                                                           |
-| `Ctrl+W`                      | Close tab (closing the last tab closes the window)                |
-| `Ctrl+Tab` / `Ctrl+Shift+Tab` | Next / previous tab                                               |
-| `Alt+←` / `Alt+→`             | Back / forward                                                    |
-| Mouse side buttons            | Back / forward                                                    |
-| `Alt+↑`                       | Parent folder                                                     |
-| `Ctrl+L` / `Alt+D`            | Edit the path (`Enter` to go, `Esc` to cancel)                    |
-| `Ctrl+F`                      | Focus the search field (when it lives in the navigation bar)      |
-| Middle-click tab              | Close tab                                                         |
-| Right-click tab               | Close others / close to the right / duplicate / copy & paste path |
-| Right-click path bar          | Copy path / copy absolute path / paste path / edit path           |
+| Shortcut                      | Action                                                                       |
+| ----------------------------- | ---------------------------------------------------------------------------- |
+| `Ctrl+T`                      | New tab                                                                      |
+| `Ctrl+W`                      | Close tab (closing the last tab closes the window; pinned tabs are immune)   |
+| `Ctrl+Shift+T`                | Reopen the last closed tab                                                   |
+| `Ctrl+Tab` / `Ctrl+Shift+Tab` | Next / previous tab                                                          |
+| `Ctrl+1` … `Ctrl+8`           | Jump to that tab                                                             |
+| `Ctrl+9`                      | Jump to the last tab                                                         |
+| `Alt+←` / `Alt+→`             | Back / forward                                                               |
+| Mouse side buttons            | Back / forward                                                               |
+| `Alt+↑`                       | Parent folder                                                                |
+| `Ctrl+L` / `Alt+D`            | Edit the path (`Tab` completes, `↑`/`↓` select, `Enter` goes, `Esc` cancels) |
+| `Ctrl+F`                      | Focus the search field (when it lives in the navigation bar)                 |
+| `Ctrl+Shift+C`                | Copy the current folder's absolute path                                      |
+| `Ctrl+Shift+D`                | Summon the shelf to the mouse and add the selection (global, rebindable)    |
+| Drag tab                      | Reorder tabs                                                                 |
+| Middle-click tab              | Close tab                                                                    |
+| Right-click tab               | Pin / quick access / shelf / close others / duplicate / copy & paste path    |
+| Right-click `+`               | Quick Access menu                                                            |
+| Right-click `◀` / `▶`         | Full history dropdown                                                        |
+| Right-click path bar          | Copy path / copy absolute path / paste path / edit path                      |
 
 Preferences live under `Edit > Preferences > Yozolab > Tabstep`
-(new-tab folder, navigation bar, tab title length, middle-click close,
-mouse side buttons, ping behaviour).
+(new-tab folder, new-tab position, navigation bar, status bar, search filter
+chips, tab title length, middle-click close, mouse side buttons, ping
+behaviour, shelf one-shot).
 
 ## Harmony (optional but recommended)
 
@@ -97,8 +167,8 @@ navigation bar is enabled; regular Project windows are never touched.
 
 ## Notes / limitations
 
-- The embedded browser is shared between tabs, so the search text and scroll
-  position are not kept per tab — only the folder and its history are.
+- The embedded browser is shared between tabs. The folder, its history and the
+  search text are kept per tab; the scroll position is not.
 - While searching, a search-scope header row appears above the results, just
   like in the stock Project window; clearing the search removes it again.
 - The search field in the navigation bar accepts the stock filter syntax

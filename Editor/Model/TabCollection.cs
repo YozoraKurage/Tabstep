@@ -60,6 +60,19 @@ namespace Yozolab.Tabstep
             _activeIndex = ((_activeIndex + delta) % _tabs.Count + _tabs.Count) % _tabs.Count;
         }
 
+        /// <summary>Moves a tab to another position (drag reorder); the active tab stays active.</summary>
+        public bool Move(int from, int to)
+        {
+            if (from < 0 || from >= _tabs.Count || to < 0 || to >= _tabs.Count || from == to)
+                return false;
+            var active = ActiveTab;
+            var tab = _tabs[from];
+            _tabs.RemoveAt(from);
+            _tabs.Insert(to, tab);
+            _activeIndex = _tabs.IndexOf(active);
+            return true;
+        }
+
         /// <summary>
         /// Closes the tab. Closing the active tab activates its right neighbour
         /// (or the new last tab), matching Explorer. Returns false for an invalid index.
@@ -67,6 +80,7 @@ namespace Yozolab.Tabstep
         public bool CloseTab(int index)
         {
             if (index < 0 || index >= _tabs.Count) return false;
+            var closed = _tabs[index];
             _tabs.RemoveAt(index);
             if (_tabs.Count == 0)
                 _activeIndex = -1;
@@ -74,23 +88,45 @@ namespace Yozolab.Tabstep
                 _activeIndex--;
             else if (_activeIndex >= _tabs.Count)
                 _activeIndex = _tabs.Count - 1;
+            OnTabClosed(closed);
             return true;
         }
 
+        /// <summary>Closes every tab except the given one and the close-exempt (pinned) ones.</summary>
         public void CloseOthers(int index)
         {
             if (index < 0 || index >= _tabs.Count) return;
             var keep = _tabs[index];
-            _tabs.Clear();
-            _tabs.Add(keep);
-            _activeIndex = 0;
+            for (int i = _tabs.Count - 1; i >= 0; i--)
+            {
+                if (ReferenceEquals(_tabs[i], keep) || IsCloseExempt(_tabs[i])) continue;
+                var closed = _tabs[i];
+                _tabs.RemoveAt(i);
+                OnTabClosed(closed);
+            }
+            _activeIndex = _tabs.IndexOf(keep);
         }
 
+        /// <summary>Closes the tabs right of the given one, skipping close-exempt (pinned) ones.</summary>
         public void CloseToRight(int index)
         {
             if (index < 0 || index >= _tabs.Count) return;
-            _tabs.RemoveRange(index + 1, _tabs.Count - index - 1);
-            if (_activeIndex >= _tabs.Count) _activeIndex = _tabs.Count - 1;
+            var active = ActiveTab;
+            for (int i = _tabs.Count - 1; i > index; i--)
+            {
+                if (IsCloseExempt(_tabs[i])) continue;
+                var closed = _tabs[i];
+                _tabs.RemoveAt(i);
+                OnTabClosed(closed);
+            }
+            _activeIndex = _tabs.IndexOf(active);
+            if (_activeIndex < 0) _activeIndex = Math.Min(index, _tabs.Count - 1);
         }
+
+        /// <summary>Exempt tabs survive Close Others / Close to the Right (pinned tabs).</summary>
+        protected virtual bool IsCloseExempt(TTab tab) => false;
+
+        /// <summary>Called for every tab removed by a close operation (recently-closed history).</summary>
+        protected virtual void OnTabClosed(TTab tab) { }
     }
 }

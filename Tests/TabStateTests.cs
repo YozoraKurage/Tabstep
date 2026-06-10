@@ -106,5 +106,44 @@ namespace Yozolab.Tabstep.Tests
             Assert.AreEqual("Assets/B", copy.CurrentPath);
             Assert.AreEqual(2, tab.History.Count);
         }
+
+        [Test]
+        public void Clone_CopiesSearchText_ButNotThePin()
+        {
+            var tab = new TabState("Assets") { Pinned = true, SearchText = "t:Texture" };
+            var copy = tab.Clone();
+            Assert.AreEqual("t:Texture", copy.SearchText);
+            Assert.IsFalse(copy.Pinned);
+        }
+
+        [Test]
+        public void GoToHistoryIndex_JumpsWithoutLosingForwardHistory()
+        {
+            var tab = new TabState("Assets");
+            tab.Navigate("Assets/A");
+            tab.Navigate("Assets/A/B");
+
+            tab.GoToHistoryIndex(0);
+            Assert.AreEqual("Assets", tab.CurrentPath);
+            Assert.IsTrue(tab.CanGoForward);
+            Assert.AreEqual(3, tab.History.Count);
+        }
+
+        [Test]
+        public void GoToHistoryIndex_IgnoresOutOfRange()
+        {
+            var tab = new TabState("Assets");
+            tab.Navigate("Assets/A");
+            tab.GoToHistoryIndex(5);
+            tab.GoToHistoryIndex(-1);
+            Assert.AreEqual("Assets/A", tab.CurrentPath);
+        }
+
+        [Test]
+        public void SearchText_NeverNull()
+        {
+            var tab = new TabState("Assets") { SearchText = null };
+            Assert.AreEqual("", tab.SearchText);
+        }
     }
 }

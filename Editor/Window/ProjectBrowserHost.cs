@@ -301,6 +301,24 @@ namespace Yozolab.Tabstep
             Invoke(SetAsLastInteractedMethod);
         }
 
+        /// <summary>
+        /// The asset list (right column / search results) rect in host-content
+        /// coordinates, zero when unknown. Lets the host tell list clicks apart from
+        /// folder-tree clicks.
+        /// </summary>
+        public Rect GetListAreaRect()
+        {
+            if (_browser == null || ListAreaRectField == null) return Rect.zero;
+            try
+            {
+                return (Rect)ListAreaRectField.GetValue(_browser);
+            }
+            catch
+            {
+                return Rect.zero;
+            }
+        }
+
         /// <summary>Folder currently shown by the embedded browser, or null when unknown.</summary>
         public string GetActiveFolderPath()
         {
