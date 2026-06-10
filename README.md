@@ -92,12 +92,14 @@ another tab's folder, an Inspector object field, the Hierarchy, the Scene view.
 - **Component relay** — drop a component (drag its Inspector header) on the
   shelf, then right-click it to paste a copy onto the selected GameObjects.
   Right-click also offers ping / select / copy for every item.
-- **Stays out of the way** — shown as a borderless popup that never steals
-  focus, so you can switch tabs underneath it mid-drag. Drag its title row to
-  move it. It survives domain reloads, closes with its Tabstep window (unless
-  pinned with the `Pin` button), and an emptied unpinned shelf closes itself.
-- Items are stored as GUIDs / GlobalObjectIds, so they survive domain reloads;
-  scene objects resolve while their scene is open and grey out otherwise.
+- **A window like any other** — a regular floating editor window: move it by
+  its title tab, dock it anywhere, and it stays above the main window like
+  every floating Unity window. It is saved into the layout, closes with its
+  Tabstep window (unless pinned with the `Pin` button), and an emptied
+  unpinned shelf closes itself.
+- Items are stored as GUIDs / GlobalObjectIds, so they survive domain reloads
+  and restarts; scene objects resolve while their scene is open and grey out
+  otherwise.
 
 ## Tabstep Inspector (parked)
 

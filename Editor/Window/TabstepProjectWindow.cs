@@ -441,6 +441,14 @@ namespace Yozolab.Tabstep
                 TabstepShelfWindow.Toggle(this);
                 e.Use();
             }
+            else if (ctrl && e.shift && e.keyCode == KeyCode.X)
+            {
+                // Fallback for the global "Tabstep/Summon Shelf" shortcut — covers
+                // setups where the Shortcut Manager binding is shadowed. When the
+                // global binding fires first, this window never sees the key.
+                TabstepShelfWindow.SummonToMouse();
+                e.Use();
+            }
             else if (ctrl && !e.shift && e.keyCode >= KeyCode.Alpha1 && e.keyCode <= KeyCode.Alpha9)
             {
                 // Ctrl+1..8 jump to that tab, Ctrl+9 to the last one (browser convention).
