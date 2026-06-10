@@ -71,10 +71,13 @@ namespace Yozolab.Tabstep
             var window = Instance;
             if (window == null)
             {
+                // The alive flag must be up before CreateInstance: OnEnable runs inside
+                // it, and an unset flag reads as "ghost from a saved layout" — which
+                // would close the shelf the moment it appears.
+                SessionState.SetBool(AliveKey, true);
                 window = CreateInstance<TabstepShelfWindow>();
                 window.PositionNear(anchor);
                 window.ShowPopup();
-                SessionState.SetBool(AliveKey, true);
             }
             window.Repaint();
             return window;

@@ -101,6 +101,10 @@ namespace Yozolab.Tabstep
         bool _dragActive;
         bool _dragZoneVisible;
 
+        // A middle press in the embedded asset list was converted to a left click;
+        // the matching release opens the now-selected folder in a new tab.
+        bool _browserMiddleClickArmed;
+
         // Spring-loading the nav buttons: hovering ◀ ▶ ▲ with a drag in flight navigates
         // after a moment, like Explorer — so a drag can walk back through the history.
         int _navSpringTarget;
@@ -128,7 +132,6 @@ namespace Yozolab.Tabstep
         string _statusSelectionText = "";
         double _statusSelectionTime;
 
-        Vector2 _startPageScroll;
         bool _openWorkspacePopup; // "Save Tabs As..." defers the popup to the next OnGUI
 
         static GUIStyle _rightMiniLabel;
@@ -163,17 +166,11 @@ namespace Yozolab.Tabstep
             return AssetDatabase.IsValidFolder(path) ? path : null;
         }
 
-        /// <summary>
-        /// Opens <paramref name="folderPath"/> as a new active tab. With no folder given,
-        /// the new tab is the start page (when enabled) or the default folder.
-        /// </summary>
+        /// <summary>Opens <paramref name="folderPath"/> (or the default folder) as a new active tab.</summary>
         public void OpenInNewTab(string folderPath)
         {
-            // An empty TabState (no history) is the start page; navigating fills it in.
-            var tab = folderPath == null && TabstepSettings.NewTabStartPage
-                ? new TabState()
-                : new TabState(ValidFolderOrDefault(folderPath));
-            _session.AddTab(tab, TabstepSettings.NewTabBesideActive);
+            _session.AddTab(new TabState(ValidFolderOrDefault(folderPath)),
+                TabstepSettings.NewTabBesideActive);
             _applyTabToBrowser = true;
             Repaint();
         }
@@ -255,17 +252,54 @@ namespace Yozolab.Tabstep
             var content = new Rect(0, top, position.width, position.height - top - statusHeight);
             if (content.height > 0)
             {
-                if (_session.ActiveTab != null && _session.ActiveTab.CurrentPath == null)
-                    DrawStartPage(content);
-                else
-                    // The navigation bar replaces the browser's path header (and, when the
-                    // Harmony patches are active, its whole toolbar) — only while it's shown,
-                    // so a path display and search always remain available.
-                    _host.OnGUI(content, showNav);
+                bool middleClickReleased = ConvertBrowserMiddleClick(content);
+                // The navigation bar replaces the browser's path header (and, when the
+                // Harmony patches are active, its whole toolbar) — only while it's shown,
+                // so a path display and search always remain available.
+                _host.OnGUI(content, showNav);
+                if (middleClickReleased) OpenSelectedFolderInNewTab();
             }
             if (showStatus)
                 DrawStatusBar(new Rect(0, position.height - statusHeight, position.width, statusHeight));
             DrawPathSuggestions();
+        }
+
+        /// <summary>
+        /// Middle-click on a folder in the embedded asset list opens it in a new tab.
+        /// The browser has no middle-click behaviour of its own, so the press is
+        /// converted into a left click — which makes the browser select whatever is
+        /// under the cursor — and the release reads that selection back. Restricted to
+        /// the list area: tree clicks navigate by themselves and must stay untouched.
+        /// Returns true on the (converted) release, after which the caller — once the
+        /// browser has processed the click — opens the selected folder.
+        /// </summary>
+        bool ConvertBrowserMiddleClick(Rect content)
+        {
+            var e = Event.current;
+            if (e.button != 2 || (e.type != EventType.MouseDown && e.type != EventType.MouseUp))
+                return false;
+            var list = _host.GetListAreaRect();
+            if (list.width <= 0f) return false;
+            var listRect = new Rect(content.x + list.x, content.y + list.y, list.width, list.height);
+            if (e.type == EventType.MouseDown)
+            {
+                // Only a press that starts in the list arms the release.
+                _browserMiddleClickArmed = listRect.Contains(e.mousePosition);
+                if (_browserMiddleClickArmed) e.button = 0;
+                return false;
+            }
+            if (!_browserMiddleClickArmed) return false;
+            _browserMiddleClickArmed = false;
+            if (!listRect.Contains(e.mousePosition)) return false;
+            e.button = 0;
+            return true;
+        }
+
+        void OpenSelectedFolderInNewTab()
+        {
+            var path = AssetDatabase.GetAssetPath(Selection.activeObject);
+            if (!string.IsNullOrEmpty(path) && AssetDatabase.IsValidFolder(path))
+                OpenInNewTab(path);
         }
 
         // ---- browser <-> tab sync --------------------------------------------
@@ -278,13 +312,6 @@ namespace Yozolab.Tabstep
             if (_applyTabToBrowser)
             {
                 _applyTabToBrowser = false;
-                if (tab.CurrentPath == null)
-                {
-                    // Start page: nothing to push to the browser. Baseline the observed
-                    // path so a later external ping registers as a change (below).
-                    _observedBrowserPath = _host.GetActiveFolderPath();
-                    return;
-                }
                 if (!_host.ShowFolder(tab.CurrentPath))
                 {
                     // Folder was deleted/renamed while the tab pointed at it.
@@ -299,19 +326,6 @@ namespace Yozolab.Tabstep
                     _host.SetSearch(saved);
                 _searchText = saved;
                 _lastAppliedSearch = _host.GetSearchText() ?? saved;
-                return;
-            }
-
-            if (tab.CurrentPath == null)
-            {
-                // Start page is showing. A ping / "Show in Project" from outside drove
-                // the hidden browser somewhere — adopt that folder into this empty tab.
-                var external = _host.GetActiveFolderPath();
-                if (external != null && external != _observedBrowserPath)
-                {
-                    _observedBrowserPath = external;
-                    tab.Navigate(external);
-                }
                 return;
             }
 
@@ -1289,7 +1303,7 @@ namespace Yozolab.Tabstep
             return paths;
         }
 
-        /// <summary>Active tab's folder, or null on a start page — the shelf hands assets off here.</summary>
+        /// <summary>Active tab's folder — the shelf hands assets off here.</summary>
         internal string ActiveFolderPath => _session.ActiveTab?.CurrentPath;
 
         /// <summary>Moves assets into the active tab's folder (used by the shelf's "→ Tab").</summary>
@@ -1648,22 +1662,8 @@ namespace Yozolab.Tabstep
             var inner = new Rect(rect.x + 4, rect.y, rect.width - 8, rect.height);
             float x = inner.x;
 
-            if (tab.CurrentPath == null)
-            {
-                // Start page tab — no crumbs yet; the bar invites typing a path.
-                GUI.Label(inner, "New Tab — type a path (Ctrl+L) or pick a folder below",
-                    EditorStyles.centeredGreyMiniLabel);
-                EditorGUIUtility.AddCursorRect(inner, MouseCursor.Text);
-                if (e.type == EventType.MouseDown && e.button == 0 && inner.Contains(e.mousePosition))
-                {
-                    e.Use();
-                    BeginPathEdit();
-                }
-                return;
-            }
-
             // Folder icon at the left, like Explorer's address bar.
-            var icon = AssetDatabase.GetCachedIcon(tab.CurrentPath);
+            var icon = tab.CurrentPath != null ? AssetDatabase.GetCachedIcon(tab.CurrentPath) : null;
             if (icon != null)
             {
                 GUI.DrawTexture(new Rect(x, inner.y + (inner.height - 16) / 2, 16, 16), icon,
@@ -1859,115 +1859,6 @@ namespace Yozolab.Tabstep
                 // breadcrumbs without navigating, like Explorer.
                 _editingPath = false;
                 ClearPathSuggestions();
-            }
-        }
-
-        // ---- start page ----------------------------------------------------------
-
-        /// <summary>
-        /// What an empty tab shows instead of the embedded browser: Quick Access,
-        /// saved searches and recently closed tabs. Clicking navigates this tab;
-        /// middle-clicking opens a new one.
-        /// </summary>
-        void DrawStartPage(Rect content)
-        {
-            GUILayout.BeginArea(content);
-            _startPageScroll = EditorGUILayout.BeginScrollView(_startPageScroll);
-            EditorGUILayout.Space(10);
-
-            GUILayout.Label("Quick Access", EditorStyles.boldLabel);
-            if (TabstepBookmarks.Folders.Count == 0)
-                GUILayout.Label("Right-click a tab (or the + button) to add folders here.",
-                    EditorStyles.miniLabel);
-            else
-                DrawStartFolderButtons(TabstepBookmarks.Folders);
-
-            if (TabstepBookmarks.Searches.Count > 0)
-            {
-                EditorGUILayout.Space(10);
-                GUILayout.Label("Saved Searches", EditorStyles.boldLabel);
-                foreach (var saved in TabstepBookmarks.Searches)
-                {
-                    var entry = saved;
-                    bool valid = AssetDatabase.IsValidFolder(entry.folder);
-                    var label = new GUIContent($"“{entry.search}”   —   {entry.folder}", entry.folder);
-                    using (new EditorGUI.DisabledScope(!valid))
-                        if (GUILayout.Button(label, GUILayout.Height(22)))
-                        {
-                            if (Event.current.button == 2)
-                            {
-                                OpenSavedSearchInNewTab(entry.folder, entry.search);
-                            }
-                            else
-                            {
-                                var tab = _session.ActiveTab;
-                                tab.Navigate(entry.folder);
-                                tab.SearchText = entry.search;
-                                _applyTabToBrowser = true;
-                                Repaint();
-                            }
-                        }
-                }
-            }
-
-            DrawStartRecentlyClosed();
-
-            EditorGUILayout.EndScrollView();
-            GUILayout.EndArea();
-        }
-
-        void DrawStartFolderButtons(IReadOnlyList<string> folders)
-        {
-            const float buttonWidth = 180f;
-            int perRow = Mathf.Max(1, (int)((position.width - 20) / (buttonWidth + 6)));
-            int i = 0;
-            while (i < folders.Count)
-            {
-                EditorGUILayout.BeginHorizontal();
-                for (int column = 0; column < perRow && i < folders.Count; column++, i++)
-                    DrawStartFolderButton(folders[i], buttonWidth);
-                GUILayout.FlexibleSpace();
-                EditorGUILayout.EndHorizontal();
-            }
-        }
-
-        void DrawStartFolderButton(string path, float width)
-        {
-            bool valid = AssetDatabase.IsValidFolder(path);
-            var icon = valid ? AssetDatabase.GetCachedIcon(path) : null;
-            var content = new GUIContent(" " + (ProjectPaths.GetDisplayName(path) ?? path), icon, path);
-            using (new EditorGUI.DisabledScope(!valid))
-                if (GUILayout.Button(content, GUILayout.Width(width), GUILayout.Height(24)))
-                {
-                    if (Event.current.button == 2) OpenInNewTab(path);
-                    else NavigateTo(path);
-                }
-        }
-
-        void DrawStartRecentlyClosed()
-        {
-            var closed = _session.RecentlyClosed;
-            bool any = false;
-            int shown = 0;
-            for (int i = closed.Count - 1; i >= 0 && shown < 5; i--)
-            {
-                var path = closed[i].CurrentPath;
-                if (path == null) continue; // closed start pages are not worth listing
-                if (!any)
-                {
-                    EditorGUILayout.Space(10);
-                    GUILayout.Label("Recently Closed", EditorStyles.boldLabel);
-                    any = true;
-                }
-                shown++;
-                bool valid = AssetDatabase.IsValidFolder(path);
-                var icon = valid ? AssetDatabase.GetCachedIcon(path) : null;
-                using (new EditorGUI.DisabledScope(!valid))
-                    if (GUILayout.Button(new GUIContent(" " + path, icon), GUILayout.Height(22)))
-                    {
-                        if (Event.current.button == 2) OpenInNewTab(path);
-                        else NavigateTo(path);
-                    }
             }
         }
 

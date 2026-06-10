@@ -20,9 +20,10 @@ like the built-in Project window. On top of it, Tabstep adds:
   the last closed tab with its full history; the last 10 are remembered.
 - **Back / forward history per tab** — navigate like a web browser, including
   with the mouse side (thumb) buttons. Right-click ◀ / ▶ for the full history
-  as a dropdown; middle-click ◀ / ▶ / ▲ (or a breadcrumb segment) to open the
-  destination in a new tab. Hovering ◀ / ▶ / ▲ while dragging assets
-  spring-loads the navigation, so a drag can walk through the history.
+  as a dropdown. Hovering ◀ / ▶ / ▲ while dragging assets spring-loads the
+  navigation, so a drag can walk through the history.
+- **Middle-click opens a new tab** — on a folder in the asset list, on a
+  breadcrumb segment, on ◀ / ▶ / ▲ and on path suggestions, like browser links.
 - **Per-tab search** — each tab remembers its own search filter and restores
   it when the tab becomes active again. Configurable filter chips next to the
   search field toggle `t:` filters with one click.
@@ -33,8 +34,6 @@ like the built-in Project window. On top of it, Tabstep adds:
   saved searches* (a filter pinned to the folder it was made in); add either
   from that menu or from a tab's context menu. Stored per user and per
   project in `UserSettings/`.
-- **Start page** — a fresh tab (`Ctrl+T`) shows Quick Access, saved searches
-  and recently closed tabs instead of jumping to a folder (toggleable).
 - **Workspaces** — save the whole tab set (order, pins, histories, searches)
   under a name via the `▾` dropdown and restore it any time.
 - **Undo asset moves** — moved something onto the wrong tab? *Undo Last Asset
@@ -131,9 +130,9 @@ Open via `YozoLab > Tabstep`.
 | Right-click path bar          | Copy path / copy absolute path / paste path / edit path                      |
 
 Preferences live under `Edit > Preferences > Yozolab > Tabstep`
-(new-tab folder, new-tab position, start page, navigation bar, status bar,
-search filter chips, tab title length, middle-click close, mouse side
-buttons, ping behaviour, shelf one-shot).
+(new-tab folder, new-tab position, navigation bar, status bar, search filter
+chips, tab title length, middle-click close, mouse side buttons, ping
+behaviour, shelf one-shot).
 
 ## Harmony (optional but recommended)
 

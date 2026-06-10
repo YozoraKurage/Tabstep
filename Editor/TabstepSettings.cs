@@ -29,13 +29,6 @@ namespace Yozolab.Tabstep
             set => EditorPrefs.SetBool(Prefix + "NewTabBesideActive", value);
         }
 
-        /// <summary>A fresh tab (Ctrl+T) shows the start page instead of jumping to a folder.</summary>
-        public static bool NewTabStartPage
-        {
-            get => EditorPrefs.GetBool(Prefix + "NewTabStartPage", true);
-            set => EditorPrefs.SetBool(Prefix + "NewTabStartPage", value);
-        }
-
         /// <summary>Status bar at the bottom: folder item count and selection summary.</summary>
         public static bool ShowStatusBar
         {
@@ -96,7 +89,7 @@ namespace Yozolab.Tabstep
             {
                 "NewTabFolder", "MiddleClickClosesTab", "ShowNavigationBar", "MaxTabTitleLength",
                 "PingOpensNewTab", "MouseSideButtonsNavigate", "NewTabBesideActive", "ShelfOneShot",
-                "NewTabStartPage", "ShowStatusBar", "SearchChips",
+                "ShowStatusBar", "SearchChips",
             };
             foreach (var key in keys)
                 EditorPrefs.DeleteKey(Prefix + key);
@@ -140,11 +133,6 @@ namespace Yozolab.Tabstep
                 new GUIContent("Open New Tab Beside Active",
                     "New tabs open right of the active tab instead of at the end of the bar."),
                 TabstepSettings.NewTabBesideActive);
-            TabstepSettings.NewTabStartPage = EditorGUILayout.Toggle(
-                new GUIContent("New Tab Shows Start Page",
-                    "A fresh tab (Ctrl+T) shows Quick Access, saved searches and recently " +
-                    "closed tabs instead of jumping straight to a folder."),
-                TabstepSettings.NewTabStartPage);
             TabstepSettings.MaxTabTitleLength = EditorGUILayout.IntSlider(
                 new GUIContent("Max Tab Title Length"),
                 TabstepSettings.MaxTabTitleLength, 4, 60);

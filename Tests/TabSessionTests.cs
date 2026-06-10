@@ -269,7 +269,7 @@ namespace Yozolab.Tabstep.Tests
         }
 
         [Test]
-        public void AddTab_StartPageTab_HasNoPathUntilNavigated()
+        public void AddTab_EmptyTab_HasNoPathUntilNavigated()
         {
             var session = SessionWith("Assets");
             var tab = session.AddTab(new TabState(), besideActive: false);
