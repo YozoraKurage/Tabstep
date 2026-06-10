@@ -44,6 +44,16 @@ namespace Yozolab.Tabstep
             return InsertAfter(Math.Max(ActiveIndex, PinnedCount - 1), tab);
         }
 
+        /// <summary>
+        /// Deep copy of the whole session — tabs with their history, pins, the active
+        /// index and the recently-closed list — for duplicating a window. The same
+        /// serialization round-trip the workspace store uses.
+        /// </summary>
+        public TabSession Clone()
+        {
+            return JsonUtility.FromJson<TabSession>(JsonUtility.ToJson(this));
+        }
+
         /// <summary>Inserts a copy (including history) right after the source and activates it.</summary>
         public TabState DuplicateTab(int index)
         {

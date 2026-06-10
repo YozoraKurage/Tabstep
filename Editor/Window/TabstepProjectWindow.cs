@@ -195,6 +195,85 @@ namespace Yozolab.Tabstep
             return ProjectPaths.AssetsRoot;
         }
 
+        // ---- multi-window --------------------------------------------------------
+
+        /// <summary>
+        /// Creates an additional floating Tabstep window showing the given tabs.
+        /// Unlike <see cref="Open"/> (which focuses the existing window) this always
+        /// makes a new one — any number of Tabstep windows can coexist; each owns its
+        /// own session and embedded browser.
+        /// </summary>
+        static TabstepProjectWindow CreateNewWindow(TabSession session, Rect screenRect)
+        {
+            var window = CreateInstance<TabstepProjectWindow>();
+            // OnEnable already ran (with an empty session, opening a default tab) —
+            // the prepared session simply replaces it before the first OnGUI.
+            window._session = session;
+            window._applyTabToBrowser = true;
+            window.minSize = new Vector2(400, 250);
+            // Show(): a regular floating editor window — dockable, saved into the layout.
+            window.Show();
+            window.position = screenRect;
+            window.Focus();
+            return window;
+        }
+
+        /// <summary>Opens a copy of the tab (history included) in a new window.</summary>
+        void OpenTabInNewWindow(int index)
+        {
+            if (index < 0 || index >= _session.Count) return;
+            var session = new TabSession();
+            session.Add(_session.Tabs[index].Clone());
+            CreateNewWindow(session, CascadePosition());
+        }
+
+        /// <summary>
+        /// Moves the tab (history included) out into its own window, docked into the
+        /// layout right beside this one — as if its tab had been dropped on this
+        /// pane's right edge. When docking is unavailable the new window stays
+        /// floating at this window's right side instead.
+        /// </summary>
+        void SeparateTab(int index)
+        {
+            if (_session.Count <= 1) return; // moving the only tab would just relocate the window
+            var tab = _session.DetachTab(index);
+            if (tab == null) return;
+            tab.Pinned = false; // the pin belongs to the old window's slot
+            var session = new TabSession();
+            session.Add(tab);
+            var window = CreateNewWindow(session, RightSidePosition());
+            WindowDocking.DockRightOf(this, window);
+            _applyTabToBrowser = true;
+            Repaint();
+        }
+
+        /// <summary>Clones this whole window — every tab, pins and the active tab included.</summary>
+        void DuplicateWindow()
+        {
+            CreateNewWindow(_session.Clone(), CascadePosition());
+        }
+
+        Rect CascadePosition()
+        {
+            return ClampToMainWindow(new Rect(
+                position.x + 28f, position.y + 28f, position.width, position.height));
+        }
+
+        Rect RightSidePosition()
+        {
+            return ClampToMainWindow(new Rect(
+                position.xMax + 6f, position.y, position.width, position.height));
+        }
+
+        /// <summary>Keeps enough of a new window over the main window to stay grabbable.</summary>
+        static Rect ClampToMainWindow(Rect rect)
+        {
+            var main = EditorGUIUtility.GetMainWindowPosition();
+            rect.x = Mathf.Clamp(rect.x, main.x - rect.width + 80f, Mathf.Max(main.x, main.xMax - 80f));
+            rect.y = Mathf.Clamp(rect.y, main.y, Mathf.Max(main.y, main.yMax - 80f));
+            return rect;
+        }
+
         void OnEnable()
         {
             titleContent = new GUIContent("Tabstep", EditorGUIUtility.IconContent("Project").image);
@@ -213,10 +292,13 @@ namespace Yozolab.Tabstep
 
         void OnDestroy()
         {
-            // The shelf belongs to this window unless the user pinned it.
-            // (OnDestroy, not OnDisable: domain reloads must not close the shelf.)
-            if (TabstepShelfWindow.IsOpen && !TabstepShelfWindow.Instance.KeepOpen)
-                TabstepShelfWindow.Instance.Close();
+            // The shelf belongs to the Tabstep windows unless the user pinned it; it
+            // closes with the last of them. (OnDestroy, not OnDisable: domain reloads
+            // must not close the shelf.)
+            if (!TabstepShelfWindow.IsOpen || TabstepShelfWindow.Instance.KeepOpen) return;
+            foreach (var window in Resources.FindObjectsOfTypeAll<TabstepProjectWindow>())
+                if (window != this) return;
+            TabstepShelfWindow.Instance.Close();
         }
 
         void OnGUI()
@@ -1232,6 +1314,13 @@ namespace Yozolab.Tabstep
                 _applyTabToBrowser = true;
                 Repaint();
             });
+            menu.AddItem(new GUIContent("Open in New Window"), false, () => OpenTabInNewWindow(index));
+            if (_session.Count > 1)
+                menu.AddItem(new GUIContent("Separate Tab"), false, () => SeparateTab(index));
+            else
+                menu.AddDisabledItem(new GUIContent("Separate Tab"));
+            menu.AddItem(new GUIContent("Duplicate Window"), false, DuplicateWindow);
+            menu.AddSeparator("");
             menu.AddItem(new GUIContent("Copy Path"), false,
                 () => EditorGUIUtility.systemCopyBuffer = _session.Tabs[index].CurrentPath);
             var pastedFolder = ResolveExternalPath(EditorGUIUtility.systemCopyBuffer, out var pingPath);
@@ -1305,15 +1394,6 @@ namespace Yozolab.Tabstep
                     paths.Add(path);
             }
             return paths;
-        }
-
-        /// <summary>Active tab's folder — the shelf hands assets off here.</summary>
-        internal string ActiveFolderPath => _session.ActiveTab?.CurrentPath;
-
-        /// <summary>Moves assets into the active tab's folder (used by the shelf's "→ Tab").</summary>
-        internal int MoveAssetsToActiveFolder(List<string> paths)
-        {
-            return MoveAssetsTo(ActiveFolderPath, paths);
         }
 
         int MoveAssetsTo(string targetFolder, List<string> paths)

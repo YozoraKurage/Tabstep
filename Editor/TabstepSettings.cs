@@ -181,7 +181,8 @@ namespace Yozolab.Tabstep
             TabstepSettings.ShelfOneShot = EditorGUILayout.Toggle(
                 new GUIContent("One-Shot Items",
                     "Dragging an item out of the shelf consumes it — the shelf is a hand-off, " +
-                    "not a copy source. Off keeps items until removed manually."),
+                    "not a copy source. Off keeps items until removed manually. " +
+                    "Locked items are never consumed."),
                 TabstepSettings.ShelfOneShot);
             EditorGUI.indentLevel--;
 

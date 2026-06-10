@@ -9,14 +9,25 @@ namespace Yozolab.Tabstep
     /// One object parked on the Tabstep Shelf. Stored as a GlobalObjectId (plus the
     /// asset GUID when it is an asset) instead of a raw Object reference, so items
     /// survive domain reloads and identify sub-assets and scene objects precisely;
-    /// scene objects resolve only while their scene is open.
+    /// scene objects resolve only while their scene is open. Whether an item came
+    /// from the Project (an asset) or from a scene is recorded explicitly, and a
+    /// locked item is kept on the shelf for the rest of the editor session.
     /// </summary>
     [Serializable]
     class ShelfItem
     {
+        /// <summary>Where the object lives — distinguished when the item is created.</summary>
+        public enum SourceKind
+        {
+            Asset,
+            Scene,
+        }
+
         [SerializeField] string _globalId = "";
         [SerializeField] string _guid = "";
         [SerializeField] string _displayName = "";
+        [SerializeField] SourceKind _kind = SourceKind.Asset;
+        [SerializeField] bool _locked;
 
         [NonSerialized] Object _cached;
 
@@ -35,6 +46,7 @@ namespace Yozolab.Tabstep
             // be resolved again has no business on the shelf.
             if (globalId.identifierType == 0 && string.IsNullOrEmpty(item._guid)) return null;
             item._globalId = globalId.ToString();
+            item._kind = string.IsNullOrEmpty(item._guid) ? SourceKind.Scene : SourceKind.Asset;
             item._cached = obj;
             return item;
         }
@@ -42,14 +54,28 @@ namespace Yozolab.Tabstep
         /// <summary>Stable identity for dedup and for tracking an item through a drag.</summary>
         public string Key => string.IsNullOrEmpty(_globalId) ? _guid : _globalId;
 
-        public bool IsAsset => !string.IsNullOrEmpty(_guid);
+        public SourceKind Kind => _kind;
+
+        public bool IsAsset => _kind == SourceKind.Asset;
+
+        public bool IsSceneObject => _kind == SourceKind.Scene;
+
+        /// <summary>
+        /// A locked item survives one-shot drag-outs and "Clear", and is restored for
+        /// the rest of the editor session even if the shelf window is closed.
+        /// </summary>
+        public bool Locked
+        {
+            get => _locked;
+            set => _locked = value;
+        }
 
         /// <summary>Project path for assets (feeds DragAndDrop.paths), null for scene objects.</summary>
         public string AssetPath
         {
             get
             {
-                if (!IsAsset) return null;
+                if (!IsAsset || string.IsNullOrEmpty(_guid)) return null;
                 var path = AssetDatabase.GUIDToAssetPath(_guid);
                 return string.IsNullOrEmpty(path) ? null : path;
             }

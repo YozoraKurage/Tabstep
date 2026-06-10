@@ -36,6 +36,12 @@ like the built-in Project window. On top of it, Tabstep adds:
   project in `UserSettings/`.
 - **Workspaces** — save the whole tab set (order, pins, histories, searches)
   under a name via the `▾` dropdown and restore it any time.
+- **Multiple windows** — any number of Tabstep windows can coexist, each with
+  its own tabs. From a tab's context menu: *Open in New Window* opens a copy
+  of the tab (history included) in a new window, *Separate Tab* moves the tab
+  out and docks it into the layout right beside the current window (floating
+  at its right side when docking isn't possible), and *Duplicate Window*
+  clones the whole window — every tab, pins and the active tab included.
 - **Undo asset moves** — moved something onto the wrong tab? *Undo Last Asset
   Move* in the tab / path-bar context menus puts everything back.
 - **Status bar** — item count of the shown folder plus the selection's count
@@ -88,8 +94,12 @@ another tab's folder, an Inspector object field, the Hierarchy, the Scene view.
 - **One-shot by default** — dragging an item out consumes it: the shelf is a
   hand-off, not a copy source. Dragging it back before dropping restores it;
   the behaviour is toggleable in preferences.
-- **Bulk hand-offs** — the `≡` handle drags every item out in one go, and
-  `→ Tab` moves all asset items straight into the active tab's folder.
+- **Multi-selection** — click selects an item, Shift-click extends the
+  selection, Ctrl/Cmd-click toggles; dragging any selected item carries the
+  whole selection out in one drag.
+- **Locking** — the padlock at the left edge of a row keeps that item on the
+  shelf: locked items survive one-shot drag-outs and `Clear`, and are restored
+  for the rest of the editor session even if the shelf window is closed.
 - **Component relay** — drop a component (drag its Inspector header) on the
   shelf, then right-click it to paste a copy onto the selected GameObjects.
   Right-click also offers ping / select / copy for every item.
