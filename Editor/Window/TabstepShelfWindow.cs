@@ -1,5 +1,6 @@
 using System.Collections.Generic;
 using UnityEditor;
+using UnityEditorInternal;
 using UnityEngine;
 using Object = UnityEngine.Object;
 
@@ -22,6 +23,7 @@ namespace Yozolab.Tabstep
     class TabstepShelfWindow : EditorWindow
     {
         const string DragKey = "Tabstep.ShelfDrag";
+        const string AllKey = "*"; // generic-data value for the drag-all handle
         const string AliveKey = "Tabstep.ShelfAlive";
         const float RowHeight = 22f;
         static readonly Vector2 DefaultSize = new Vector2(230, 190);
@@ -33,9 +35,11 @@ namespace Yozolab.Tabstep
 
         Vector2 _scroll;
         ShelfItem _mouseDownItem;
-        // One-shot bookkeeping: the item consumed by the current drag-out, restored
+        bool _dragAllArmed;
+        // One-shot bookkeeping: the item(s) consumed by the current drag-out, restored
         // if the very same drag re-enters the shelf and drops.
-        ShelfItem _lastDraggedOut;
+        readonly List<ShelfItem> _draggedOut = new List<ShelfItem>();
+        string _draggedOutKey;
 
         public static TabstepShelfWindow Instance
         {
@@ -143,7 +147,9 @@ namespace Yozolab.Tabstep
         {
             EditorGUILayout.BeginHorizontal(EditorStyles.toolbar);
             GUILayout.Label("Shelf", EditorStyles.boldLabel, GUILayout.ExpandWidth(false));
+            DrawDragAllHandle();
             GUILayout.FlexibleSpace();
+            DrawMoveToTabButton();
             _keepOpen = GUILayout.Toggle(_keepOpen,
                 new GUIContent("Pin", "Keep the shelf open when the Tabstep window closes"),
                 EditorStyles.toolbarButton, GUILayout.ExpandWidth(false));
@@ -162,11 +168,82 @@ namespace Yozolab.Tabstep
             var headerRect = GUILayoutUtility.GetLastRect();
             var e = Event.current;
             // Dragging the empty part of the header moves the popup window.
-            if (e.type == EventType.MouseDrag && e.button == 0 && _mouseDownItem == null &&
+            if (e.type == EventType.MouseDrag && e.button == 0 &&
+                _mouseDownItem == null && !_dragAllArmed &&
                 headerRect.Contains(e.mousePosition - e.delta))
             {
                 position = new Rect(position.position + e.delta, position.size);
                 e.Use();
+            }
+        }
+
+        /// <summary>Drag this handle to carry every (living) item out in one drag.</summary>
+        void DrawDragAllHandle()
+        {
+            if (_items.Count == 0) return;
+            var content = new GUIContent("≡", "Drag all items out at once");
+            var rect = GUILayoutUtility.GetRect(content, EditorStyles.toolbarButton, GUILayout.Width(24));
+            GUI.Label(rect, content, EditorStyles.toolbarButton);
+            var e = Event.current;
+            switch (e.type)
+            {
+                case EventType.MouseDown when e.button == 0 && rect.Contains(e.mousePosition):
+                    _dragAllArmed = true;
+                    e.Use();
+                    break;
+                case EventType.MouseUp:
+                    _dragAllArmed = false;
+                    break;
+                case EventType.MouseDrag when _dragAllArmed:
+                    _dragAllArmed = false;
+                    StartDragAll();
+                    e.Use();
+                    break;
+            }
+        }
+
+        void StartDragAll()
+        {
+            var objects = new List<Object>();
+            var paths = new List<string>();
+            foreach (var item in _items)
+            {
+                var obj = item.Resolve();
+                if (obj == null) continue;
+                objects.Add(obj);
+                if (item.AssetPath != null) paths.Add(item.AssetPath);
+            }
+            if (objects.Count == 0) return;
+            _draggedOut.Clear();
+            _draggedOutKey = null;
+            DragAndDrop.PrepareStartDrag();
+            DragAndDrop.objectReferences = objects.ToArray();
+            if (paths.Count > 0) DragAndDrop.paths = paths.ToArray();
+            DragAndDrop.SetGenericData(DragKey, AllKey);
+            DragAndDrop.StartDrag($"Shelf ({objects.Count} items)");
+        }
+
+        /// <summary>Hands every asset item over to the active Tabstep tab's folder.</summary>
+        void DrawMoveToTabButton()
+        {
+            var windows = Resources.FindObjectsOfTypeAll<TabstepProjectWindow>();
+            var target = windows.Length > 0 ? windows[0] : null;
+            var assetPaths = new List<string>();
+            foreach (var item in _items)
+                if (item.AssetPath != null && item.Resolve() != null)
+                    assetPaths.Add(item.AssetPath);
+            using (new EditorGUI.DisabledScope(target == null || target.ActiveFolderPath == null ||
+                                               assetPaths.Count == 0))
+            {
+                if (!GUILayout.Button(new GUIContent("→ Tab",
+                            "Move all asset items into the active tab's folder"),
+                        EditorStyles.toolbarButton, GUILayout.ExpandWidth(false)))
+                    return;
+                var folder = target.ActiveFolderPath;
+                if (target.MoveAssetsToActiveFolder(assetPaths) > 0)
+                    // Hand-off complete: drop everything that now lives in that folder.
+                    _items.RemoveAll(item => item.AssetPath != null &&
+                                             ProjectPaths.GetParent(item.AssetPath) == folder);
             }
         }
 
@@ -247,12 +324,17 @@ namespace Yozolab.Tabstep
                     _mouseDownItem = item;
                     e.Use();
                     break;
+                case EventType.MouseDown when e.button == 1 && rect.Contains(e.mousePosition):
+                    e.Use();
+                    ShowItemContextMenu(item, obj);
+                    break;
                 case EventType.MouseUp:
                     _mouseDownItem = null;
                     break;
                 case EventType.MouseDrag when _mouseDownItem == item && alive:
                     _mouseDownItem = null;
-                    _lastDraggedOut = null;
+                    _draggedOut.Clear();
+                    _draggedOutKey = null;
                     DragAndDrop.PrepareStartDrag();
                     DragAndDrop.objectReferences = new[] { obj };
                     var path = item.AssetPath;
@@ -263,6 +345,51 @@ namespace Yozolab.Tabstep
                     break;
             }
             return true;
+        }
+
+        /// <summary>
+        /// Per-item actions. For components this is the relay the drag can't do:
+        /// pasting a copy onto the selected GameObjects.
+        /// </summary>
+        void ShowItemContextMenu(ShelfItem item, Object obj)
+        {
+            var menu = new GenericMenu();
+            if (obj != null)
+            {
+                menu.AddItem(new GUIContent("Ping"), false, () => EditorGUIUtility.PingObject(obj));
+                menu.AddItem(new GUIContent("Select"), false, () => Selection.activeObject = obj);
+            }
+            else
+            {
+                menu.AddDisabledItem(new GUIContent("Ping"));
+                menu.AddDisabledItem(new GUIContent("Select"));
+            }
+            if (obj is Component component)
+            {
+                menu.AddSeparator("");
+                int targets = Selection.gameObjects.Length;
+                if (targets > 0)
+                    menu.AddItem(new GUIContent($"Add To Selected GameObject{(targets == 1 ? "" : "s")}"),
+                        false, () =>
+                        {
+                            foreach (var go in Selection.gameObjects)
+                            {
+                                ComponentUtility.CopyComponent(component);
+                                ComponentUtility.PasteComponentAsNew(go);
+                            }
+                        });
+                else
+                    menu.AddDisabledItem(new GUIContent("Add To Selected GameObjects"));
+                menu.AddItem(new GUIContent("Copy Component"), false,
+                    () => ComponentUtility.CopyComponent(component));
+            }
+            menu.AddSeparator("");
+            menu.AddItem(new GUIContent("Remove"), false, () =>
+            {
+                _items.Remove(item);
+                Repaint();
+            });
+            menu.ShowAsContext();
         }
 
         // ---- drag & drop in/out --------------------------------------------------
@@ -276,15 +403,16 @@ namespace Yozolab.Tabstep
                 case EventType.DragPerform:
                 {
                     var key = DragAndDrop.GetGenericData(DragKey) as string;
-                    if (key != null && _lastDraggedOut != null && _lastDraggedOut.Key == key)
+                    if (key != null && key == _draggedOutKey && _draggedOut.Count > 0)
                     {
-                        // The one-shot drag came back: let it drop to restore the item.
+                        // The one-shot drag came back: let it drop to restore the item(s).
                         DragAndDrop.visualMode = DragAndDropVisualMode.Move;
                         if (e.type == EventType.DragPerform)
                         {
                             DragAndDrop.AcceptDrag();
-                            _items.Add(_lastDraggedOut);
-                            _lastDraggedOut = null;
+                            _items.AddRange(_draggedOut);
+                            _draggedOut.Clear();
+                            _draggedOutKey = null;
                             e.Use();
                             // The row count changed mid-pass; abort before the stale layout draws.
                             GUIUtility.ExitGUI();
@@ -314,23 +442,28 @@ namespace Yozolab.Tabstep
                 }
                 case EventType.DragExited:
                     // Our drag left the shelf (heading for its target). With One-Shot on,
-                    // that consumes the item — it returns only if the drag re-enters.
+                    // that consumes the item(s) — they return only if the drag re-enters.
                     // A drag released inside the shelf (a cancelled pick-up) is not an exit.
                     if (!new Rect(0, 0, position.width, position.height).Contains(e.mousePosition))
-                        ConsumeDraggedOutItem();
+                        ConsumeDraggedOutItems();
                     break;
             }
         }
 
-        void ConsumeDraggedOutItem()
+        void ConsumeDraggedOutItems()
         {
             if (!TabstepSettings.ShelfOneShot) return;
             var key = DragAndDrop.GetGenericData(DragKey) as string;
             if (key == null) return;
-            var item = _items.Find(existing => existing.Key == key);
-            if (item == null) return;
-            _items.Remove(item);
-            _lastDraggedOut = item;
+            var taken = key == AllKey
+                ? new List<ShelfItem>(_items)
+                : _items.FindAll(existing => existing.Key == key);
+            if (taken.Count == 0) return;
+            foreach (var item in taken)
+                _items.Remove(item);
+            _draggedOut.Clear();
+            _draggedOut.AddRange(taken);
+            _draggedOutKey = key;
             Repaint();
             // An emptied unpinned shelf folds away once the drag has finished.
             if (_items.Count == 0 && !_keepOpen)

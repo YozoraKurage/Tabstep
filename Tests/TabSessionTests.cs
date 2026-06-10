@@ -256,6 +256,38 @@ namespace Yozolab.Tabstep.Tests
                 TabPaths(session));
         }
 
+        [Test]
+        public void AddTab_BesideActivePinnedTab_LandsOutsideThePinnedRegion()
+        {
+            var session = SessionWith("Assets", "Assets/A");
+            session.SetPinned(1, true); // Assets/A pinned, moved to index 0, stays active
+            session.Activate(0);
+            session.AddTab(new TabState("Assets/C"), besideActive: true);
+            CollectionAssert.AreEqual(new[] { "Assets/A", "Assets/C", "Assets" },
+                TabPaths(session));
+            Assert.IsFalse(session.Tabs[1].Pinned);
+        }
+
+        [Test]
+        public void AddTab_StartPageTab_HasNoPathUntilNavigated()
+        {
+            var session = SessionWith("Assets");
+            var tab = session.AddTab(new TabState(), besideActive: false);
+            Assert.IsNull(tab.CurrentPath);
+            tab.Navigate("Assets/A");
+            Assert.AreEqual("Assets/A", tab.CurrentPath);
+            Assert.IsFalse(tab.CanGoBack);
+        }
+
+        [Test]
+        public void RecentlyClosed_PeeksMostRecentLast()
+        {
+            var session = SessionWith("Assets", "Assets/A");
+            session.CloseTab(1);
+            Assert.AreEqual(1, session.RecentlyClosed.Count);
+            Assert.AreEqual("Assets/A", session.RecentlyClosed[0].CurrentPath);
+        }
+
         static string[] TabPaths(TabSession session)
         {
             var paths = new string[session.Count];

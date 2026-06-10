@@ -20,6 +20,9 @@ namespace Yozolab.Tabstep
 
         public bool HasClosedTabs => _recentlyClosed.Count > 0;
 
+        /// <summary>Most recently closed last; read-only peek for the start page.</summary>
+        public IReadOnlyList<TabState> RecentlyClosed => _recentlyClosed;
+
         public TabState OpenTab(string folderPath, bool activate = true)
         {
             return Add(new TabState(folderPath), activate);
@@ -28,8 +31,17 @@ namespace Yozolab.Tabstep
         /// <summary>Opens a tab right after the active one (never inside the pinned region).</summary>
         public TabState OpenTabAfterActive(string folderPath)
         {
-            if (ActiveIndex < 0) return OpenTab(folderPath);
-            return InsertAfter(Math.Max(ActiveIndex, PinnedCount - 1), new TabState(folderPath));
+            return AddTab(new TabState(folderPath), besideActive: true);
+        }
+
+        /// <summary>
+        /// Adds a prepared tab (possibly an empty start-page tab), either at the end of
+        /// the bar or right after the active tab — never inside the pinned region.
+        /// </summary>
+        public TabState AddTab(TabState tab, bool besideActive)
+        {
+            if (!besideActive || ActiveIndex < 0) return Add(tab);
+            return InsertAfter(Math.Max(ActiveIndex, PinnedCount - 1), tab);
         }
 
         /// <summary>Inserts a copy (including history) right after the source and activates it.</summary>

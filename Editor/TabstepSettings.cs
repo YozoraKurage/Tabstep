@@ -29,6 +29,27 @@ namespace Yozolab.Tabstep
             set => EditorPrefs.SetBool(Prefix + "NewTabBesideActive", value);
         }
 
+        /// <summary>A fresh tab (Ctrl+T) shows the start page instead of jumping to a folder.</summary>
+        public static bool NewTabStartPage
+        {
+            get => EditorPrefs.GetBool(Prefix + "NewTabStartPage", true);
+            set => EditorPrefs.SetBool(Prefix + "NewTabStartPage", value);
+        }
+
+        /// <summary>Status bar at the bottom: folder item count and selection summary.</summary>
+        public static bool ShowStatusBar
+        {
+            get => EditorPrefs.GetBool(Prefix + "ShowStatusBar", true);
+            set => EditorPrefs.SetBool(Prefix + "ShowStatusBar", value);
+        }
+
+        /// <summary>Comma-separated type names shown as one-click search filter chips; empty hides them.</summary>
+        public static string SearchChips
+        {
+            get => EditorPrefs.GetString(Prefix + "SearchChips", "Prefab,Scene,Material,Script");
+            set => EditorPrefs.SetString(Prefix + "SearchChips", value);
+        }
+
         /// <summary>Dragging an item out of the shelf consumes it (it is a hand-off, not a copy source).</summary>
         public static bool ShelfOneShot
         {
@@ -75,6 +96,7 @@ namespace Yozolab.Tabstep
             {
                 "NewTabFolder", "MiddleClickClosesTab", "ShowNavigationBar", "MaxTabTitleLength",
                 "PingOpensNewTab", "MouseSideButtonsNavigate", "NewTabBesideActive", "ShelfOneShot",
+                "NewTabStartPage", "ShowStatusBar", "SearchChips",
             };
             foreach (var key in keys)
                 EditorPrefs.DeleteKey(Prefix + key);
@@ -118,6 +140,11 @@ namespace Yozolab.Tabstep
                 new GUIContent("Open New Tab Beside Active",
                     "New tabs open right of the active tab instead of at the end of the bar."),
                 TabstepSettings.NewTabBesideActive);
+            TabstepSettings.NewTabStartPage = EditorGUILayout.Toggle(
+                new GUIContent("New Tab Shows Start Page",
+                    "A fresh tab (Ctrl+T) shows Quick Access, saved searches and recently " +
+                    "closed tabs instead of jumping straight to a folder."),
+                TabstepSettings.NewTabStartPage);
             TabstepSettings.MaxTabTitleLength = EditorGUILayout.IntSlider(
                 new GUIContent("Max Tab Title Length"),
                 TabstepSettings.MaxTabTitleLength, 4, 60);
@@ -133,6 +160,16 @@ namespace Yozolab.Tabstep
                     "absorbs its toolbar (create + search) too. When off, the stock browser " +
                     "chrome is shown instead."),
                 TabstepSettings.ShowNavigationBar);
+            TabstepSettings.ShowStatusBar = EditorGUILayout.Toggle(
+                new GUIContent("Status Bar",
+                    "A bottom row showing the current folder's item count and a summary of " +
+                    "the selected assets (count and file size)."),
+                TabstepSettings.ShowStatusBar);
+            TabstepSettings.SearchChips = EditorGUILayout.TextField(
+                new GUIContent("Search Filter Chips",
+                    "Comma-separated type names shown as one-click t: filter buttons next to " +
+                    "the search field (e.g. \"Prefab,Scene,Material,Script\"). Empty hides them."),
+                TabstepSettings.SearchChips);
             EditorGUI.indentLevel--;
 
             EditorGUILayout.Space(8);

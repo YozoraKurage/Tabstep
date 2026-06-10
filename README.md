@@ -20,12 +20,27 @@ like the built-in Project window. On top of it, Tabstep adds:
   the last closed tab with its full history; the last 10 are remembered.
 - **Back / forward history per tab** — navigate like a web browser, including
   with the mouse side (thumb) buttons. Right-click ◀ / ▶ for the full history
-  as a dropdown.
+  as a dropdown; middle-click ◀ / ▶ / ▲ (or a breadcrumb segment) to open the
+  destination in a new tab. Hovering ◀ / ▶ / ▲ while dragging assets
+  spring-loads the navigation, so a drag can walk through the history.
 - **Per-tab search** — each tab remembers its own search filter and restores
-  it when the tab becomes active again.
-- **Quick Access** — right-click the `+` button for bookmarked folders; add
-  the current folder from there or from a tab's context menu. Stored per user
-  and per project in `UserSettings/`.
+  it when the tab becomes active again. Configurable filter chips next to the
+  search field toggle `t:` filters with one click.
+- **Path autocomplete** — while editing the path (`Ctrl+L`), subfolder
+  suggestions drop down under the bar: `Tab` completes, `↑`/`↓` select,
+  `Enter` goes, clicking a suggestion jumps (middle-click: new tab).
+- **Quick Access** — right-click the `+` button for bookmarked folders *and
+  saved searches* (a filter pinned to the folder it was made in); add either
+  from that menu or from a tab's context menu. Stored per user and per
+  project in `UserSettings/`.
+- **Start page** — a fresh tab (`Ctrl+T`) shows Quick Access, saved searches
+  and recently closed tabs instead of jumping to a folder (toggleable).
+- **Workspaces** — save the whole tab set (order, pins, histories, searches)
+  under a name via the `▾` dropdown and restore it any time.
+- **Undo asset moves** — moved something onto the wrong tab? *Undo Last Asset
+  Move* in the tab / path-bar context menus puts everything back.
+- **Status bar** — item count of the shown folder plus the selection's count
+  and file size at the bottom (toggleable).
 - **Explorer-style address bar** — back/forward/up buttons, the folder icon and
   the current path as clickable breadcrumb segments in a sunken field (hover
   highlights them; parents that don't fit collapse behind `«`). Click any
@@ -69,6 +84,11 @@ another tab's folder, an Inspector object field, the Hierarchy, the Scene view.
 - **One-shot by default** — dragging an item out consumes it: the shelf is a
   hand-off, not a copy source. Dragging it back before dropping restores it;
   the behaviour is toggleable in preferences.
+- **Bulk hand-offs** — the `≡` handle drags every item out in one go, and
+  `→ Tab` moves all asset items straight into the active tab's folder.
+- **Component relay** — drop a component (drag its Inspector header) on the
+  shelf, then right-click it to paste a copy onto the selected GameObjects.
+  Right-click also offers ping / select / copy for every item.
 - **Stays out of the way** — shown as a borderless popup that never steals
   focus, so you can switch tabs underneath it mid-drag. Drag its title row to
   move it. It survives domain reloads, closes with its Tabstep window (unless
@@ -99,7 +119,7 @@ Open via `YozoLab > Tabstep`.
 | `Alt+←` / `Alt+→`             | Back / forward                                                               |
 | Mouse side buttons            | Back / forward                                                               |
 | `Alt+↑`                       | Parent folder                                                                |
-| `Ctrl+L` / `Alt+D`            | Edit the path (`Enter` to go, `Esc` to cancel)                               |
+| `Ctrl+L` / `Alt+D`            | Edit the path (`Tab` completes, `↑`/`↓` select, `Enter` goes, `Esc` cancels) |
 | `Ctrl+F`                      | Focus the search field (when it lives in the navigation bar)                 |
 | `Ctrl+Shift+C`                | Copy the current folder's absolute path                                      |
 | `Ctrl+Shift+D`                | Toggle the shelf                                                             |
@@ -111,8 +131,9 @@ Open via `YozoLab > Tabstep`.
 | Right-click path bar          | Copy path / copy absolute path / paste path / edit path                      |
 
 Preferences live under `Edit > Preferences > Yozolab > Tabstep`
-(new-tab folder, new-tab position, navigation bar, tab title length,
-middle-click close, mouse side buttons, ping behaviour, shelf one-shot).
+(new-tab folder, new-tab position, start page, navigation bar, status bar,
+search filter chips, tab title length, middle-click close, mouse side
+buttons, ping behaviour, shelf one-shot).
 
 ## Harmony (optional but recommended)
 
