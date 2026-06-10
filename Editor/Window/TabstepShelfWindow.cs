@@ -1,4 +1,7 @@
 using System.Collections.Generic;
+#if UNITY_EDITOR_WIN
+using System.Runtime.InteropServices;
+#endif
 using UnityEditor;
 using UnityEditor.ShortcutManagement;
 using UnityEditorInternal;
@@ -103,6 +106,15 @@ namespace Yozolab.Tabstep
         /// <summary>Opens the shelf at (or moves it to) a screen point, keeping its size.</summary>
         public static TabstepShelfWindow SummonAt(Vector2 screenPoint)
         {
+            // Shortcut handlers run outside any GUI context, where IMGUI's coordinate
+            // conversion can silently produce a far-off point from a stale view offset.
+            // A window placed there looks exactly like "the shortcut did nothing" —
+            // anything implausible lands on the main window instead.
+            var main = EditorGUIUtility.GetMainWindowPosition();
+            var plausible = Rect.MinMaxRect(main.xMin - 4096, main.yMin - 4096,
+                main.xMax + 4096, main.yMax + 4096);
+            if (!plausible.Contains(screenPoint)) screenPoint = main.center;
+
             var window = Instance;
             var origin = screenPoint - new Vector2(40f, 12f); // lands under the cursor
             if (window == null)
@@ -110,13 +122,12 @@ namespace Yozolab.Tabstep
                 window = CreateNew();
                 window.position = new Rect(origin, DefaultSize);
             }
-            else
+            else if (!window.docked)
             {
-                // A docked shelf has no position of its own — just focus it there.
-                if (!window.docked)
-                    window.position = new Rect(origin, window.position.size);
-                window.Focus();
+                // A docked shelf has no position of its own — it only gets focused.
+                window.position = new Rect(origin, window.position.size);
             }
+            window.Focus();
             window.Repaint();
             return window;
         }
@@ -131,12 +142,18 @@ namespace Yozolab.Tabstep
         }
 
         /// <summary>
-        /// Best available mouse position in screen coordinates. Shortcut and fallback
-        /// handlers run during event processing, so Event.current is usually there;
-        /// failing that this degrades to the hovered window, then the main window.
+        /// Best available mouse position in screen coordinates. On Windows the OS
+        /// cursor is asked directly — the one source that works in a shortcut handler,
+        /// which runs outside any GUI context. Elsewhere Event.current is used when
+        /// alive, degrading to the hovered window, then the main window.
         /// </summary>
         static Vector2 GlobalMousePosition()
         {
+#if UNITY_EDITOR_WIN
+            // GetCursorPos reports physical pixels; editor rects use scaled points.
+            if (GetCursorPos(out var cursor))
+                return new Vector2(cursor.x, cursor.y) / EditorGUIUtility.pixelsPerPoint;
+#endif
             try
             {
                 if (Event.current != null)
@@ -150,6 +167,18 @@ namespace Yozolab.Tabstep
             if (hovered != null) return hovered.position.center;
             return EditorGUIUtility.GetMainWindowPosition().center;
         }
+
+#if UNITY_EDITOR_WIN
+        [StructLayout(LayoutKind.Sequential)]
+        struct Win32Point
+        {
+            public int x;
+            public int y;
+        }
+
+        [DllImport("user32.dll")]
+        static extern bool GetCursorPos(out Win32Point point);
+#endif
 
         public static void Toggle(EditorWindow anchor)
         {
