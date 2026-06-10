@@ -80,10 +80,11 @@ another tab's folder, an Inspector object field, the Hierarchy, the Scene view.
 - **Getting things onto it** — drop them on the shelf window, drop them on the
   `▼ Shelf` zone that appears at the right end of the tab bar while you drag
   assets, or use *Send Selection to Shelf* in a tab's context menu.
-- **`Ctrl+Shift+X` summons it** — a global, rebindable shortcut (Shortcut
-  Manager: *Tabstep/Summon Shelf*) that works from any editor window: the
-  shelf jumps to the mouse position, and whatever assets, folders or scene
-  objects are selected get added to it in the same stroke.
+- **`Ctrl+Shift+D` summons it** — a global, rebindable shortcut (Shortcut
+  Manager: *Tabstep/Summon Shelf*, with a built-in fallback while the Tabstep
+  window is focused): the shelf jumps to the mouse position, and whatever
+  assets, folders or scene objects are selected get added to it in the same
+  stroke.
 - **One-shot by default** — dragging an item out consumes it: the shelf is a
   hand-off, not a copy source. Dragging it back before dropping restores it;
   the behaviour is toggleable in preferences.
@@ -127,8 +128,7 @@ Open via `YozoLab > Tabstep`.
 | `Ctrl+L` / `Alt+D`            | Edit the path (`Tab` completes, `↑`/`↓` select, `Enter` goes, `Esc` cancels) |
 | `Ctrl+F`                      | Focus the search field (when it lives in the navigation bar)                 |
 | `Ctrl+Shift+C`                | Copy the current folder's absolute path                                      |
-| `Ctrl+Shift+D`                | Toggle the shelf                                                             |
-| `Ctrl+Shift+X`                | Summon the shelf to the mouse and add the selection (global, rebindable)    |
+| `Ctrl+Shift+D`                | Summon the shelf to the mouse and add the selection (global, rebindable)    |
 | Drag tab                      | Reorder tabs                                                                 |
 | Middle-click tab              | Close tab                                                                    |
 | Right-click tab               | Pin / quick access / shelf / close others / duplicate / copy & paste path    |

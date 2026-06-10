@@ -21,7 +21,8 @@ namespace Yozolab.Tabstep
     /// Ctrl(+Shift)+Tab cycle tabs, Ctrl+1..9 jump to a tab (9 = last),
     /// Alt+Left/Right or mouse side buttons back/forward, Alt+Up parent folder,
     /// Ctrl+L / Alt+D edit the path, Ctrl+F focus the search field,
-    /// Ctrl+Shift+C copy the absolute path, Ctrl+Shift+D toggle the shelf.
+    /// Ctrl+Shift+C copy the absolute path, Ctrl+Shift+D summon the shelf
+    /// to the mouse (adding the selection).
     /// </summary>
     public class TabstepProjectWindow : EditorWindow
     {
@@ -437,11 +438,6 @@ namespace Yozolab.Tabstep
                 e.Use();
             }
             else if (ctrl && e.shift && e.keyCode == KeyCode.D)
-            {
-                TabstepShelfWindow.Toggle(this);
-                e.Use();
-            }
-            else if (ctrl && e.shift && e.keyCode == KeyCode.X)
             {
                 // Fallback for the global "Tabstep/Summon Shelf" shortcut — covers
                 // setups where the Shortcut Manager binding is shadowed. When the
@@ -1582,7 +1578,8 @@ namespace Yozolab.Tabstep
             bool now = GUILayout.Toggle(open,
                 new GUIContent("Shelf",
                     "The shelf — a temporary tray for assets in transit between tabs, " +
-                    "Inspector fields and the scene (Ctrl+Shift+D)"),
+                    "Inspector fields and the scene. Ctrl+Shift+D summons it to the " +
+                    "mouse and adds the selection."),
                 EditorStyles.toolbarButton, GUILayout.ExpandWidth(false));
             if (now != open) TabstepShelfWindow.Toggle(this);
         }

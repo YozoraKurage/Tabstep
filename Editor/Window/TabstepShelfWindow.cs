@@ -18,7 +18,7 @@ namespace Yozolab.Tabstep
     /// A regular floating EditorWindow, treated exactly like the Tabstep window
     /// itself: it moves by its own title tab, floats above the main editor window
     /// (standard Unity z-order for floating windows), can be docked, and survives
-    /// restarts through the layout. Ctrl+Shift+X — a global, rebindable shortcut,
+    /// restarts through the layout. Ctrl+Shift+D — a global, rebindable shortcut,
     /// with a fallback handler inside the Tabstep window — summons it to the mouse
     /// and drops the current selection onto it.
     ///
@@ -84,12 +84,12 @@ namespace Yozolab.Tabstep
         }
 
         /// <summary>
-        /// The global Ctrl+Shift+X gesture: brings the shelf (existing or new) to the
+        /// The global Ctrl+Shift+D gesture: brings the shelf (existing or new) to the
         /// mouse and drops the current selection onto it. Rebindable in the Shortcut
         /// Manager; the Tabstep window also handles the same combination itself as a
         /// fallback, in case the binding is shadowed in a given setup.
         /// </summary>
-        [Shortcut("Tabstep/Summon Shelf", KeyCode.X, ShortcutModifiers.Action | ShortcutModifiers.Shift)]
+        [Shortcut("Tabstep/Summon Shelf", KeyCode.D, ShortcutModifiers.Action | ShortcutModifiers.Shift)]
         static void SummonShortcut()
         {
             SummonToMouse();
