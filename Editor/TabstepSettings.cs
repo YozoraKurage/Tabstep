@@ -22,6 +22,20 @@ namespace Yozolab.Tabstep
             set => EditorPrefs.SetBool(Prefix + "MiddleClickClosesTab", value);
         }
 
+        /// <summary>New tabs open right of the active tab instead of at the end of the bar.</summary>
+        public static bool NewTabBesideActive
+        {
+            get => EditorPrefs.GetBool(Prefix + "NewTabBesideActive", false);
+            set => EditorPrefs.SetBool(Prefix + "NewTabBesideActive", value);
+        }
+
+        /// <summary>Dragging an item out of the shelf consumes it (it is a hand-off, not a copy source).</summary>
+        public static bool ShelfOneShot
+        {
+            get => EditorPrefs.GetBool(Prefix + "ShelfOneShot", true);
+            set => EditorPrefs.SetBool(Prefix + "ShelfOneShot", value);
+        }
+
         /// <summary>
         /// Show the navigation bar (back/forward/up + address bar) under the tabs. It
         /// replaces the browser's own "Assets &gt; ..." path header, and — with Harmony
@@ -60,7 +74,7 @@ namespace Yozolab.Tabstep
             string[] keys =
             {
                 "NewTabFolder", "MiddleClickClosesTab", "ShowNavigationBar", "MaxTabTitleLength",
-                "PingOpensNewTab", "MouseSideButtonsNavigate",
+                "PingOpensNewTab", "MouseSideButtonsNavigate", "NewTabBesideActive", "ShelfOneShot",
             };
             foreach (var key in keys)
                 EditorPrefs.DeleteKey(Prefix + key);
@@ -83,6 +97,7 @@ namespace Yozolab.Tabstep
                 {
                     "project", "browser", "tab", "explorer", "breadcrumb", "history",
                     "inspector", "ping", "double click", "mouse", "side button", "path header",
+                    "shelf", "pin", "quick access", "bookmark", "reorder",
                 }),
             };
         }
@@ -99,6 +114,10 @@ namespace Yozolab.Tabstep
             TabstepSettings.MiddleClickClosesTab = EditorGUILayout.Toggle(
                 new GUIContent("Middle-Click Closes Tab"),
                 TabstepSettings.MiddleClickClosesTab);
+            TabstepSettings.NewTabBesideActive = EditorGUILayout.Toggle(
+                new GUIContent("Open New Tab Beside Active",
+                    "New tabs open right of the active tab instead of at the end of the bar."),
+                TabstepSettings.NewTabBesideActive);
             TabstepSettings.MaxTabTitleLength = EditorGUILayout.IntSlider(
                 new GUIContent("Max Tab Title Length"),
                 TabstepSettings.MaxTabTitleLength, 4, 60);
@@ -129,6 +148,16 @@ namespace Yozolab.Tabstep
                     "When something outside the window (an Inspector object field, \"Show in Project\"...) " +
                     "changes the shown folder, open it as a new tab instead of replacing the current one."),
                 TabstepSettings.PingOpensNewTab);
+            EditorGUI.indentLevel--;
+
+            EditorGUILayout.Space(8);
+            EditorGUILayout.LabelField("Shelf", EditorStyles.boldLabel);
+            EditorGUI.indentLevel++;
+            TabstepSettings.ShelfOneShot = EditorGUILayout.Toggle(
+                new GUIContent("One-Shot Items",
+                    "Dragging an item out of the shelf consumes it — the shelf is a hand-off, " +
+                    "not a copy source. Off keeps items until removed manually."),
+                TabstepSettings.ShelfOneShot);
             EditorGUI.indentLevel--;
 
             EditorGUILayout.Space(10);

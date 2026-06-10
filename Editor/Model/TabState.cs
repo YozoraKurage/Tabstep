@@ -16,6 +16,8 @@ namespace Yozolab.Tabstep
 
         [SerializeField] List<string> _history = new List<string>();
         [SerializeField] int _index = -1;
+        [SerializeField] bool _pinned;
+        [SerializeField] string _searchText = "";
 
         public TabState() { }
 
@@ -28,6 +30,21 @@ namespace Yozolab.Tabstep
         public bool CanGoBack => _index > 0;
         public bool CanGoForward => _index < _history.Count - 1;
         public IReadOnlyList<string> History => _history;
+        public int HistoryIndex => _index;
+
+        /// <summary>Pinned tabs sit leftmost, render icon-only and resist accidental closing.</summary>
+        public bool Pinned
+        {
+            get => _pinned;
+            set => _pinned = value;
+        }
+
+        /// <summary>The tab's own search filter, restored when the tab becomes active again.</summary>
+        public string SearchText
+        {
+            get => _searchText;
+            set => _searchText = value ?? "";
+        }
 
         /// <summary>
         /// Enter a folder. Like a web browser, anything ahead of the current position
@@ -71,12 +88,20 @@ namespace Yozolab.Tabstep
             return CurrentPath;
         }
 
+        /// <summary>Jumps straight to a history entry (the back/forward dropdown menu).</summary>
+        public void GoToHistoryIndex(int index)
+        {
+            if (index >= 0 && index < _history.Count) _index = index;
+        }
+
+        /// <summary>The copy is never pinned: pinning is a property of the tab's slot, not its content.</summary>
         public TabState Clone()
         {
             return new TabState
             {
                 _history = new List<string>(_history),
                 _index = _index,
+                _searchText = _searchText,
             };
         }
     }

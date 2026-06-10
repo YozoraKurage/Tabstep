@@ -17,9 +17,11 @@ namespace Yozolab.Tabstep
     /// disappear entirely: their create button and search field move into the
     /// navigation bar, and the freed rows go to the folder view.
     ///
-    /// Shortcuts: Ctrl+T new tab, Ctrl+W close tab, Ctrl(+Shift)+Tab cycle tabs,
+    /// Shortcuts: Ctrl+T new tab, Ctrl+W close tab, Ctrl+Shift+T reopen closed tab,
+    /// Ctrl(+Shift)+Tab cycle tabs, Ctrl+1..9 jump to a tab (9 = last),
     /// Alt+Left/Right or mouse side buttons back/forward, Alt+Up parent folder,
-    /// Ctrl+L / Alt+D edit the path, Ctrl+F focus the search field.
+    /// Ctrl+L / Alt+D edit the path, Ctrl+F focus the search field,
+    /// Ctrl+Shift+C copy the absolute path, Ctrl+Shift+D toggle the shelf.
     /// </summary>
     public class TabstepProjectWindow : EditorWindow
     {
@@ -80,6 +82,25 @@ namespace Yozolab.Tabstep
         int _dragHoverTab = -1;
         double _dragHoverStart;
 
+        // Tab titles for this pass: display names, disambiguated with the parent folder
+        // when several tabs share a name. Rebuilt at the top of every DrawTabBar.
+        readonly List<string> _tabTitles = new List<string>();
+        // Tab header rects from the last Repaint pass — drag reorder hit-testing.
+        readonly List<Rect> _tabRects = new List<Rect>();
+
+        // Drag reorder: one window-level control captures the mouse; the dragged tab
+        // swaps with a neighbour when the cursor crosses that neighbour's center.
+        static readonly int TabReorderHash = "Tabstep.TabReorder".GetHashCode();
+        int _reorderIndex = -1;
+        float _reorderStartX;
+        bool _reordering;
+
+        // True while an asset drag is in flight over this window; shows the shelf drop zone.
+        // The zone's visibility is latched at Layout (_dragZoneVisible) so the control
+        // layout never changes between a Layout pass and the event passes that follow it.
+        bool _dragActive;
+        bool _dragZoneVisible;
+
         [MenuItem("YozoLab/Tabstep")]
         public static TabstepProjectWindow Open()
         {
@@ -109,7 +130,9 @@ namespace Yozolab.Tabstep
         /// <summary>Opens <paramref name="folderPath"/> (or the default folder) as a new active tab.</summary>
         public void OpenInNewTab(string folderPath)
         {
-            _session.OpenTab(ValidFolderOrDefault(folderPath));
+            var path = ValidFolderOrDefault(folderPath);
+            if (TabstepSettings.NewTabBesideActive) _session.OpenTabAfterActive(path);
+            else _session.OpenTab(path);
             _applyTabToBrowser = true;
             Repaint();
         }
@@ -139,6 +162,14 @@ namespace Yozolab.Tabstep
             _host = null;
         }
 
+        void OnDestroy()
+        {
+            // The shelf belongs to this window unless the user pinned it.
+            // (OnDestroy, not OnDisable: domain reloads must not close the shelf.)
+            if (TabstepShelfWindow.IsOpen && !TabstepShelfWindow.Instance.KeepOpen)
+                TabstepShelfWindow.Instance.Close();
+        }
+
         void OnGUI()
         {
             if (!ProjectBrowserHost.IsAvailable)
@@ -152,6 +183,7 @@ namespace Yozolab.Tabstep
 
             if (Event.current.type == EventType.Layout)
                 SyncWithBrowser();
+            TrackDragState();
             HandleShortcuts();
             HandleMouseNavigation();
 
@@ -188,8 +220,21 @@ namespace Yozolab.Tabstep
                     _host.ShowFolder(tab.CurrentPath);
                 }
                 _observedBrowserPath = tab.CurrentPath;
+                // The browser is shared between tabs, so each tab carries its own
+                // search filter and gets it back when it becomes active again.
+                var saved = tab.SearchText ?? "";
+                if ((_host.GetSearchText() ?? "") != saved)
+                    _host.SetSearch(saved);
+                _searchText = saved;
+                _lastAppliedSearch = _host.GetSearchText() ?? saved;
                 return;
             }
+
+            // Mirror the browser's live filter into the active tab (typed into either
+            // search field, or cleared by the browser when a folder is clicked).
+            var browserSearch = _host.GetSearchText();
+            if (browserSearch != null)
+                tab.SearchText = browserSearch;
 
             // The user navigated inside the embedded browser (double-clicked a folder,
             // used the breadcrumb of the browser itself...) — record it in the tab.
@@ -264,14 +309,46 @@ namespace Yozolab.Tabstep
             if (e.type != EventType.KeyDown) return;
             bool ctrl = e.control || e.command;
 
-            if (ctrl && e.keyCode == KeyCode.T)
+            if (ctrl && e.shift && e.keyCode == KeyCode.T)
+            {
+                ReopenClosedTab();
+                e.Use();
+            }
+            else if (ctrl && e.keyCode == KeyCode.T)
             {
                 OpenInNewTab(null);
                 e.Use();
             }
             else if (ctrl && e.keyCode == KeyCode.W)
             {
-                CloseTab(_session.ActiveIndex);
+                // Pinned tabs don't close from the keyboard — that's the point of the pin.
+                if (_session.ActiveTab != null && _session.ActiveTab.Pinned)
+                    ShowNotification(new GUIContent("Tab is pinned"));
+                else
+                    CloseTab(_session.ActiveIndex);
+                e.Use();
+            }
+            else if (ctrl && e.shift && e.keyCode == KeyCode.C)
+            {
+                if (_session.ActiveTab != null)
+                {
+                    EditorGUIUtility.systemCopyBuffer = ToAbsolutePath(_session.ActiveTab.CurrentPath);
+                    ShowNotification(new GUIContent("Absolute path copied"));
+                }
+                e.Use();
+            }
+            else if (ctrl && e.shift && e.keyCode == KeyCode.D)
+            {
+                TabstepShelfWindow.Toggle(this);
+                e.Use();
+            }
+            else if (ctrl && !e.shift && e.keyCode >= KeyCode.Alpha1 && e.keyCode <= KeyCode.Alpha9)
+            {
+                // Ctrl+1..8 jump to that tab, Ctrl+9 to the last one (browser convention).
+                int target = e.keyCode == KeyCode.Alpha9
+                    ? _session.Count - 1
+                    : e.keyCode - KeyCode.Alpha1;
+                if (target >= 0 && target < _session.Count) ActivateTab(target);
                 e.Use();
             }
             else if (ctrl && e.keyCode == KeyCode.Tab)
@@ -331,6 +408,57 @@ namespace Yozolab.Tabstep
                 GoForward();
                 e.Use();
             }
+        }
+
+        /// <summary>
+        /// Tracks whether an asset drag is hovering the window — the tab bar shows the
+        /// shelf drop zone only while one is. Runs before the bar and the embedded
+        /// browser, so it sees the events even when they get consumed later.
+        /// </summary>
+        void TrackDragState()
+        {
+            var e = Event.current;
+            if (e.type == EventType.Layout)
+            {
+                _dragZoneVisible = _dragActive;
+                return;
+            }
+            if (e.type == EventType.DragUpdated)
+            {
+                bool active = DragAndDrop.objectReferences.Length > 0;
+                if (active != _dragActive)
+                {
+                    _dragActive = active;
+                    Repaint();
+                }
+            }
+            // Not on DragPerform: the drop zone itself still has to see that event later
+            // in this same pass. The DragExited that follows (or the first plain mouse
+            // event after the drag) hides the zone again.
+            else if (_dragActive &&
+                     (e.type == EventType.DragExited || e.type == EventType.MouseMove ||
+                      e.type == EventType.MouseDown || e.type == EventType.MouseDrag))
+            {
+                _dragActive = false;
+                Repaint();
+            }
+        }
+
+        void ReopenClosedTab()
+        {
+            if (_session.ReopenClosedTab() == null)
+            {
+                ShowNotification(new GUIContent("No recently closed tabs"));
+                return;
+            }
+            _applyTabToBrowser = true;
+            Repaint();
+        }
+
+        /// <summary>Path as a single GenericMenu item label — '/' would create submenus.</summary>
+        static string MenuPath(string path)
+        {
+            return (path ?? "").Replace("/", " › ");
         }
 
         // ---- path bar copy / paste ----------------------------------------------
@@ -426,10 +554,12 @@ namespace Yozolab.Tabstep
 
         void DrawTabBar()
         {
+            BuildTabTitles();
+            int reorderControl = GUIUtility.GetControlID(TabReorderHash, FocusType.Passive);
             EditorGUILayout.BeginHorizontal(EditorStyles.toolbar);
             for (int i = 0; i < _session.Count; i++)
             {
-                if (DrawTab(i))
+                if (DrawTab(i, reorderControl))
                 {
                     // Structure changed mid-loop (a tab closed) — bail out of this pass.
                     EditorGUILayout.EndHorizontal();
@@ -437,27 +567,70 @@ namespace Yozolab.Tabstep
                     return;
                 }
             }
-            if (GUILayout.Button(new GUIContent("+", "New tab (Ctrl+T)"), EditorStyles.toolbarButton,
-                    GUILayout.Width(26)))
-                OpenInNewTab(null);
+            DrawNewTabButton();
             GUILayout.FlexibleSpace();
+            DrawShelfDropZone();
+            DrawTabListButton();
             EditorGUILayout.EndHorizontal();
-            HandleTabBarDragAndDrop(GUILayoutUtility.GetLastRect());
+            var barRect = GUILayoutUtility.GetLastRect();
+            HandleTabReorder(reorderControl);
+            HandleTabBarDragAndDrop(barRect);
+        }
+
+        /// <summary>
+        /// Tab titles for this pass. Tabs sharing a display name (Scripts, Textures...)
+        /// get their parent folder appended so they stay distinguishable.
+        /// </summary>
+        void BuildTabTitles()
+        {
+            _tabTitles.Clear();
+            var counts = new Dictionary<string, int>();
+            foreach (var tab in _session.Tabs)
+            {
+                var name = ProjectPaths.GetDisplayName(tab.CurrentPath) ?? "(empty)";
+                counts[name] = counts.TryGetValue(name, out var c) ? c + 1 : 1;
+            }
+            foreach (var tab in _session.Tabs)
+            {
+                var name = ProjectPaths.GetDisplayName(tab.CurrentPath) ?? "(empty)";
+                if (counts[name] > 1)
+                {
+                    var parent = ProjectPaths.GetDisplayName(ProjectPaths.GetParent(tab.CurrentPath));
+                    if (parent != null) name = name + " — " + parent;
+                }
+                _tabTitles.Add(ProjectPaths.Ellipsize(name, TabstepSettings.MaxTabTitleLength));
+            }
+            while (_tabRects.Count < _session.Count) _tabRects.Add(Rect.zero);
+            while (_tabRects.Count > _session.Count) _tabRects.RemoveAt(_tabRects.Count - 1);
         }
 
         /// <summary>Draws one tab. Returns true when the tab was closed (layout is now stale).</summary>
-        bool DrawTab(int index)
+        bool DrawTab(int index, int reorderControl)
         {
             var tab = _session.Tabs[index];
             bool active = index == _session.ActiveIndex;
-            string title = ProjectPaths.Ellipsize(
-                ProjectPaths.GetDisplayName(tab.CurrentPath) ?? "(empty)",
-                TabstepSettings.MaxTabTitleLength);
-            // Trailing spaces reserve room for the close glyph drawn over the active tab.
-            var content = new GUIContent(active ? title + "    " : title, tab.CurrentPath);
-
             var style = EditorStyles.toolbarButton;
-            var rect = GUILayoutUtility.GetRect(content, style, GUILayout.MaxWidth(200));
+
+            GUIContent content;
+            Rect rect;
+            if (tab.Pinned)
+            {
+                // Pinned tabs shrink to their folder icon, like a browser's pinned tabs.
+                var icon = AssetDatabase.GetCachedIcon(tab.CurrentPath);
+                content = icon != null
+                    ? new GUIContent(icon, tab.CurrentPath)
+                    : new GUIContent(ProjectPaths.Ellipsize(_tabTitles[index], 4), tab.CurrentPath);
+                rect = GUILayoutUtility.GetRect(content, style, GUILayout.Width(28));
+            }
+            else
+            {
+                string title = _tabTitles[index];
+                // Trailing spaces reserve room for the close glyph drawn over the active tab.
+                content = new GUIContent(active ? title + "    " : title, tab.CurrentPath);
+                rect = GUILayoutUtility.GetRect(content, style, GUILayout.MaxWidth(200));
+            }
+            if (Event.current.type == EventType.Repaint && index < _tabRects.Count)
+                _tabRects[index] = rect;
             var closeRect = new Rect(rect.xMax - 18, rect.y + (rect.height - 16) / 2, 16, 16);
 
             HandleTabDrag(rect, index, tab);
@@ -465,13 +638,26 @@ namespace Yozolab.Tabstep
             var e = Event.current;
             if (e.type == EventType.MouseDown && rect.Contains(e.mousePosition))
             {
-                if (active && e.button == 0 && closeRect.Contains(e.mousePosition))
+                if (e.button == 0)
                 {
+                    if (active && !tab.Pinned && closeRect.Contains(e.mousePosition))
+                    {
+                        e.Use();
+                        CloseTab(index);
+                        return true;
+                    }
+                    // Activate on press (not release) so a reorder drag starts from the
+                    // same press; the window-level control keeps the capture while the
+                    // tab indices shift under the cursor.
+                    if (!active) ActivateTab(index);
+                    GUIUtility.hotControl = reorderControl;
+                    _reorderIndex = index;
+                    _reorderStartX = e.mousePosition.x;
+                    _reordering = false;
                     e.Use();
-                    CloseTab(index);
-                    return true;
+                    return false;
                 }
-                if (e.button == 2 && TabstepSettings.MiddleClickClosesTab)
+                if (e.button == 2 && TabstepSettings.MiddleClickClosesTab && !tab.Pinned)
                 {
                     e.Use();
                     CloseTab(index);
@@ -485,11 +671,152 @@ namespace Yozolab.Tabstep
                 }
             }
 
-            if (GUI.Toggle(rect, active, content, style) && !active)
-                ActivateTab(index);
-            if (active)
+            GUI.Toggle(rect, active, content, style); // visuals only; clicks are handled above
+            if (active && !tab.Pinned)
                 GUI.Label(closeRect, new GUIContent("×", "Close tab (Ctrl+W)"), EditorStyles.miniLabel);
             return false;
+        }
+
+        void DrawNewTabButton()
+        {
+            var content = new GUIContent("+", "New tab (Ctrl+T)\nRight-click: Quick Access");
+            var rect = GUILayoutUtility.GetRect(content, EditorStyles.toolbarButton, GUILayout.Width(26));
+            var e = Event.current;
+            if (e.type == EventType.MouseDown && e.button == 1 && rect.Contains(e.mousePosition))
+            {
+                e.Use();
+                ShowQuickAccessMenu(rect);
+                return;
+            }
+            if (GUI.Button(rect, content, EditorStyles.toolbarButton))
+                OpenInNewTab(null);
+        }
+
+        /// <summary>Quick Access — bookmarked folders that open as new tabs (right-click the +).</summary>
+        void ShowQuickAccessMenu(Rect dropRect)
+        {
+            var menu = new GenericMenu();
+            if (TabstepBookmarks.Folders.Count == 0)
+                menu.AddDisabledItem(new GUIContent("No Quick Access folders"));
+            foreach (var folder in TabstepBookmarks.Folders)
+            {
+                var path = folder;
+                if (AssetDatabase.IsValidFolder(path))
+                    menu.AddItem(new GUIContent(MenuPath(path)), false, () => OpenInNewTab(path));
+                else
+                    menu.AddDisabledItem(new GUIContent(MenuPath(path)));
+            }
+            menu.AddSeparator("");
+            var current = _session.ActiveTab?.CurrentPath;
+            if (current != null && !TabstepBookmarks.Contains(current))
+                menu.AddItem(new GUIContent("Add Current Folder"), false, () => TabstepBookmarks.Add(current));
+            else
+                menu.AddDisabledItem(new GUIContent("Add Current Folder"));
+            foreach (var folder in TabstepBookmarks.Folders)
+            {
+                var path = folder;
+                menu.AddItem(new GUIContent("Remove/" + MenuPath(path)), false,
+                    () => TabstepBookmarks.Remove(path));
+            }
+            menu.DropDown(dropRect);
+        }
+
+        /// <summary>Every tab as a dropdown — the escape hatch when the bar overflows.</summary>
+        void DrawTabListButton()
+        {
+            var content = new GUIContent("▾", "All tabs");
+            var rect = GUILayoutUtility.GetRect(content, EditorStyles.toolbarButton, GUILayout.Width(20));
+            if (!EditorGUI.DropdownButton(rect, content, FocusType.Passive, EditorStyles.toolbarButton))
+                return;
+            var menu = new GenericMenu();
+            for (int i = 0; i < _session.Count; i++)
+            {
+                int index = i;
+                menu.AddItem(new GUIContent(MenuPath(_session.Tabs[i].CurrentPath)),
+                    i == _session.ActiveIndex, () => ActivateTab(index));
+            }
+            menu.DropDown(rect);
+        }
+
+        /// <summary>
+        /// Appears at the right of the tab bar only while assets are being dragged:
+        /// dropping parks them on the shelf for a later hand-off instead of moving them.
+        /// </summary>
+        void DrawShelfDropZone()
+        {
+            if (!_dragZoneVisible) return;
+            var content = new GUIContent("▼ Shelf", "Drop here to park on the shelf");
+            var rect = GUILayoutUtility.GetRect(content, EditorStyles.toolbarButton, GUILayout.Width(64));
+            var e = Event.current;
+            bool hover = rect.Contains(e.mousePosition);
+            if (e.type == EventType.Repaint)
+            {
+                EditorStyles.toolbarButton.Draw(rect, content, hover, false, false, false);
+                EditorGUI.DrawRect(rect, new Color(0.5f, 0.7f, 1f, hover ? 0.35f : 0.15f));
+            }
+            if ((e.type == EventType.DragUpdated || e.type == EventType.DragPerform) && hover)
+            {
+                if (DragAndDrop.objectReferences.Length == 0) return;
+                DragAndDrop.visualMode = DragAndDropVisualMode.Copy;
+                if (e.type == EventType.DragPerform)
+                {
+                    DragAndDrop.AcceptDrag();
+                    TabstepShelfWindow.ShowNear(this).AddObjects(DragAndDrop.objectReferences);
+                }
+                e.Use();
+            }
+        }
+
+        // ---- tab drag reorder ----------------------------------------------------
+
+        /// <summary>Drag a tab header sideways to reorder; pinned tabs stay among pinned.</summary>
+        void HandleTabReorder(int controlId)
+        {
+            if (GUIUtility.hotControl != controlId) return;
+            var e = Event.current;
+            switch (e.rawType)
+            {
+                case EventType.MouseDrag:
+                    if (_reorderIndex < 0 || _reorderIndex >= _session.Count) break;
+                    if (!_reordering && Mathf.Abs(e.mousePosition.x - _reorderStartX) < 5f)
+                    {
+                        e.Use();
+                        break;
+                    }
+                    _reordering = true;
+                    int target = TabIndexAt(e.mousePosition.x);
+                    if (target >= 0 && target != _reorderIndex && CrossedCenter(target, e.mousePosition.x))
+                    {
+                        int moved = _session.MoveTab(_reorderIndex, target);
+                        if (moved >= 0) _reorderIndex = moved;
+                        Repaint();
+                    }
+                    e.Use();
+                    break;
+                case EventType.MouseUp:
+                    GUIUtility.hotControl = 0;
+                    _reorderIndex = -1;
+                    _reordering = false;
+                    e.Use();
+                    break;
+            }
+        }
+
+        int TabIndexAt(float x)
+        {
+            int count = Math.Min(_session.Count, _tabRects.Count);
+            for (int i = 0; i < count; i++)
+                if (x >= _tabRects[i].xMin && x < _tabRects[i].xMax)
+                    return i;
+            return -1;
+        }
+
+        /// <summary>Swap only once the cursor passes the neighbour's center — avoids flicker.</summary>
+        bool CrossedCenter(int target, float x)
+        {
+            if (target < 0 || target >= _tabRects.Count) return false;
+            float center = _tabRects[target].center.x;
+            return target > _reorderIndex ? x > center : x < center;
         }
 
         void ShowTabContextMenu(int index)
@@ -514,6 +841,28 @@ namespace Yozolab.Tabstep
                 });
             else
                 menu.AddDisabledItem(new GUIContent("Close Tabs to the Right"));
+            if (_session.HasClosedTabs)
+                menu.AddItem(new GUIContent("Reopen Closed Tab"), false, ReopenClosedTab);
+            else
+                menu.AddDisabledItem(new GUIContent("Reopen Closed Tab"));
+            menu.AddSeparator("");
+            var tab = _session.Tabs[index];
+            menu.AddItem(new GUIContent(tab.Pinned ? "Unpin Tab" : "Pin Tab"), false, () =>
+            {
+                _session.SetPinned(index, !tab.Pinned);
+                Repaint();
+            });
+            if (TabstepBookmarks.Contains(tab.CurrentPath))
+                menu.AddItem(new GUIContent("Remove from Quick Access"), false,
+                    () => TabstepBookmarks.Remove(tab.CurrentPath));
+            else
+                menu.AddItem(new GUIContent("Add to Quick Access"), false,
+                    () => TabstepBookmarks.Add(tab.CurrentPath));
+            if (Selection.objects.Length > 0)
+                menu.AddItem(new GUIContent("Send Selection to Shelf"), false,
+                    () => TabstepShelfWindow.ShowNear(this).AddObjects(Selection.objects));
+            else
+                menu.AddDisabledItem(new GUIContent("Send Selection to Shelf"));
             menu.AddSeparator("");
             menu.AddItem(new GUIContent("Duplicate Tab"), false, () =>
             {
@@ -650,13 +999,21 @@ namespace Yozolab.Tabstep
             bool integrated = ProjectBrowserPatcher.Active;
             EditorGUILayout.BeginHorizontal(EditorStyles.toolbar);
 
+            // Back/forward get explicit rects: right-clicking either lists the history,
+            // and that must work even while the button itself is disabled.
+            var backContent = new GUIContent("◀", "Back (Alt+Left)\nRight-click: history");
+            var backRect = GUILayoutUtility.GetRect(backContent, EditorStyles.toolbarButton,
+                GUILayout.Width(26));
+            HandleHistoryMenuClick(backRect, tab);
             using (new EditorGUI.DisabledScope(tab == null || !tab.CanGoBack))
-                if (GUILayout.Button(new GUIContent("◀", "Back (Alt+Left)"), EditorStyles.toolbarButton,
-                        GUILayout.Width(26)))
+                if (GUI.Button(backRect, backContent, EditorStyles.toolbarButton))
                     GoBack();
+            var forwardContent = new GUIContent("▶", "Forward (Alt+Right)\nRight-click: history");
+            var forwardRect = GUILayoutUtility.GetRect(forwardContent, EditorStyles.toolbarButton,
+                GUILayout.Width(26));
+            HandleHistoryMenuClick(forwardRect, tab);
             using (new EditorGUI.DisabledScope(tab == null || !tab.CanGoForward))
-                if (GUILayout.Button(new GUIContent("▶", "Forward (Alt+Right)"), EditorStyles.toolbarButton,
-                        GUILayout.Width(26)))
+                if (GUI.Button(forwardRect, forwardContent, EditorStyles.toolbarButton))
                     GoForward();
             var parent = ProjectPaths.GetParent(tab?.CurrentPath);
             using (new EditorGUI.DisabledScope(parent == null || !AssetDatabase.IsValidFolder(parent)))
@@ -678,11 +1035,51 @@ namespace Yozolab.Tabstep
                 GUILayout.Space(2);
             }
 
+            DrawShelfToggle();
+
             EditorGUILayout.EndHorizontal();
 
             addressRect.y += 1;
             addressRect.height -= 3;
             DrawAddressBar(addressRect, tab);
+        }
+
+        void HandleHistoryMenuClick(Rect rect, TabState tab)
+        {
+            var e = Event.current;
+            if (e.type != EventType.MouseDown || e.button != 1 || !rect.Contains(e.mousePosition))
+                return;
+            e.Use();
+            ShowHistoryMenu(rect, tab);
+        }
+
+        /// <summary>Right-clicking back/forward lists the whole history, newest first.</summary>
+        void ShowHistoryMenu(Rect dropRect, TabState tab)
+        {
+            if (tab == null || tab.History.Count == 0) return;
+            var menu = new GenericMenu();
+            for (int i = tab.History.Count - 1; i >= 0; i--)
+            {
+                int index = i;
+                menu.AddItem(new GUIContent(MenuPath(tab.History[i])), i == tab.HistoryIndex, () =>
+                {
+                    tab.GoToHistoryIndex(index);
+                    _applyTabToBrowser = true;
+                    Repaint();
+                });
+            }
+            menu.DropDown(dropRect);
+        }
+
+        void DrawShelfToggle()
+        {
+            bool open = TabstepShelfWindow.IsOpen;
+            bool now = GUILayout.Toggle(open,
+                new GUIContent("Shelf",
+                    "The shelf — a temporary tray for assets in transit between tabs, " +
+                    "Inspector fields and the scene (Ctrl+Shift+D)"),
+                EditorStyles.toolbarButton, GUILayout.ExpandWidth(false));
+            if (now != open) TabstepShelfWindow.Toggle(this);
         }
 
         /// <summary>The stock toolbar's "+" dropdown: the Assets/Create menu.</summary>
@@ -730,6 +1127,9 @@ namespace Yozolab.Tabstep
             // SetSearch round-trips the text through the filter; remember the normalized
             // form so next frame's mirror check doesn't stomp what the user is typing.
             _lastAppliedSearch = _host.GetSearchText() ?? edited;
+            // The filter belongs to the tab: it comes back when the tab is next active.
+            if (_session.ActiveTab != null)
+                _session.ActiveTab.SearchText = edited;
         }
 
         /// <summary>
@@ -781,7 +1181,7 @@ namespace Yozolab.Tabstep
             for (int i = firstVisible; i < crumbs.Count; i++)
             {
                 if (i > firstVisible || firstVisible > 0)
-                    x = DrawCrumbSeparator(x, inner);
+                    x = DrawCrumbSeparator(x, inner, crumbs[i - 1].path, crumbs[i].path);
                 x = DrawCrumb(crumbs[i], i == crumbs.Count - 1, x, inner);
             }
 
@@ -839,10 +1239,39 @@ namespace Yozolab.Tabstep
             return rect.xMax;
         }
 
-        float DrawCrumbSeparator(float x, Rect inner)
+        /// <summary>
+        /// The › between crumbs is a control of its own, like Explorer's chevrons:
+        /// clicking it lists the parent crumb's subfolders for a sideways jump.
+        /// </summary>
+        float DrawCrumbSeparator(float x, Rect inner, string parentPath, string currentChildPath)
         {
-            GUI.Label(new Rect(x, inner.y, CrumbSeparatorWidth, inner.height), "›", CrumbSeparatorStyle);
+            var rect = new Rect(x, inner.y, CrumbSeparatorWidth, inner.height);
+            var e = Event.current;
+            bool hover = rect.Contains(e.mousePosition);
+            if (e.type == EventType.Repaint && hover)
+                EditorGUI.DrawRect(rect, CrumbHoverColor);
+            GUI.Label(rect, new GUIContent("›", "Subfolders of " + parentPath), CrumbSeparatorStyle);
+            if (e.type == EventType.MouseDown && e.button == 0 && hover)
+            {
+                e.Use();
+                ShowSubfolderMenu(rect, parentPath, currentChildPath);
+            }
             return x + CrumbSeparatorWidth;
+        }
+
+        void ShowSubfolderMenu(Rect dropRect, string parentPath, string currentChildPath)
+        {
+            var menu = new GenericMenu();
+            var subfolders = AssetDatabase.GetSubFolders(parentPath);
+            if (subfolders.Length == 0)
+                menu.AddDisabledItem(new GUIContent("No subfolders"));
+            foreach (var sub in subfolders)
+            {
+                var path = ProjectPaths.Normalize(sub);
+                menu.AddItem(new GUIContent(ProjectPaths.GetDisplayName(path)),
+                    path == currentChildPath, () => NavigateTo(path));
+            }
+            menu.DropDown(dropRect);
         }
 
         float DrawCrumb((string name, string path) crumb, bool isCurrent, float x, Rect inner)
