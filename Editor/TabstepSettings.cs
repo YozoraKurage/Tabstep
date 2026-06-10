@@ -22,11 +22,23 @@ namespace Yozolab.Tabstep
             set => EditorPrefs.SetBool(Prefix + "MiddleClickClosesTab", value);
         }
 
-        /// <summary>Show the back/forward/up + breadcrumb bar under the tabs.</summary>
+        /// <summary>
+        /// Show the navigation bar (back/forward/up + address bar) under the tabs. It
+        /// replaces the browser's own "Assets &gt; ..." path header, and — with Harmony
+        /// present — absorbs the browser's toolbar (create button + search field) too.
+        /// Off restores the stock browser chrome.
+        /// </summary>
         public static bool ShowNavigationBar
         {
             get => EditorPrefs.GetBool(Prefix + "ShowNavigationBar", true);
             set => EditorPrefs.SetBool(Prefix + "ShowNavigationBar", value);
+        }
+
+        /// <summary>Mouse back/forward (side) buttons navigate the active tab's history.</summary>
+        public static bool MouseSideButtonsNavigate
+        {
+            get => EditorPrefs.GetBool(Prefix + "MouseSideButtonsNavigate", true);
+            set => EditorPrefs.SetBool(Prefix + "MouseSideButtonsNavigate", value);
         }
 
         /// <summary>Tab title length before it gets ellipsized.</summary>
@@ -48,7 +60,7 @@ namespace Yozolab.Tabstep
             string[] keys =
             {
                 "NewTabFolder", "MiddleClickClosesTab", "ShowNavigationBar", "MaxTabTitleLength",
-                "PingOpensNewTab",
+                "PingOpensNewTab", "MouseSideButtonsNavigate",
             };
             foreach (var key in keys)
                 EditorPrefs.DeleteKey(Prefix + key);
@@ -70,7 +82,7 @@ namespace Yozolab.Tabstep
                 keywords = new HashSet<string>(new[]
                 {
                     "project", "browser", "tab", "explorer", "breadcrumb", "history",
-                    "inspector", "ping", "double click",
+                    "inspector", "ping", "double click", "mouse", "side button", "path header",
                 }),
             };
         }
@@ -97,13 +109,21 @@ namespace Yozolab.Tabstep
             EditorGUI.indentLevel++;
             TabstepSettings.ShowNavigationBar = EditorGUILayout.Toggle(
                 new GUIContent("Navigation Bar",
-                    "Back / forward / up buttons and the clickable breadcrumb path."),
+                    "Back / forward / up buttons and the clickable breadcrumb path. Replaces " +
+                    "the browser's own \"Assets > ...\" path header and, with Harmony present, " +
+                    "absorbs its toolbar (create + search) too. When off, the stock browser " +
+                    "chrome is shown instead."),
                 TabstepSettings.ShowNavigationBar);
             EditorGUI.indentLevel--;
 
             EditorGUILayout.Space(8);
             EditorGUILayout.LabelField("Behavior", EditorStyles.boldLabel);
             EditorGUI.indentLevel++;
+            TabstepSettings.MouseSideButtonsNavigate = EditorGUILayout.Toggle(
+                new GUIContent("Mouse Side Buttons Navigate",
+                    "The mouse back/forward (thumb) buttons move through the active tab's " +
+                    "history, like a web browser."),
+                TabstepSettings.MouseSideButtonsNavigate);
             TabstepSettings.PingOpensNewTab = EditorGUILayout.Toggle(
                 new GUIContent("Ping Opens New Tab",
                     "When something outside the window (an Inspector object field, \"Show in Project\"...) " +

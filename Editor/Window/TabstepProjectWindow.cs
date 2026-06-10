@@ -2,19 +2,24 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using UnityEditor;
+using UnityEditor.IMGUI.Controls;
 using UnityEngine;
 
 namespace Yozolab.Tabstep
 {
     /// <summary>
     /// A Project window with Windows Explorer style tabs: each tab remembers its own
-    /// folder and back/forward history, with a breadcrumb bar for quick jumps.
+    /// folder and back/forward history, with a breadcrumb address bar for quick jumps.
     /// The folder view itself is Unity's stock Project browser, embedded via
     /// <see cref="ProjectBrowserHost"/>, so search, thumbnails, drag &amp; drop and
-    /// context menus behave exactly like the built-in window.
+    /// context menus behave exactly like the built-in window. With Harmony present
+    /// (<see cref="ProjectBrowserPatcher"/>) the browser's own toolbar and path header
+    /// disappear entirely: their create button and search field move into the
+    /// navigation bar, and the freed rows go to the folder view.
     ///
     /// Shortcuts: Ctrl+T new tab, Ctrl+W close tab, Ctrl(+Shift)+Tab cycle tabs,
-    /// Alt+Left/Right back/forward, Alt+Up parent folder, Ctrl+L / Alt+D edit the path.
+    /// Alt+Left/Right or mouse side buttons back/forward, Alt+Up parent folder,
+    /// Ctrl+L / Alt+D edit the path, Ctrl+F focus the search field.
     /// </summary>
     public class TabstepProjectWindow : EditorWindow
     {
@@ -34,6 +39,16 @@ namespace Yozolab.Tabstep
         bool _editingPath;
         bool _focusPathField;
         string _pathEditText = "";
+
+        // Search field in the navigation bar (only with the Harmony patches active).
+        // Created lazily inside OnGUI: the SearchField constructor grabs a permanent
+        // control id, which throws when run from a field initializer during window
+        // deserialization. The browser owns the filter; _lastAppliedSearch tracks its
+        // normalized echo of our last SetSearch so external changes can be told apart
+        // from our own.
+        SearchField _searchField;
+        string _searchText = "";
+        string _lastAppliedSearch;
 
         const float CrumbSeparatorWidth = 12f;
         static GUIStyle _crumbStyle;
@@ -138,6 +153,7 @@ namespace Yozolab.Tabstep
             if (Event.current.type == EventType.Layout)
                 SyncWithBrowser();
             HandleShortcuts();
+            HandleMouseNavigation();
 
             float toolbarHeight = EditorStyles.toolbar.fixedHeight;
             bool showNav = TabstepSettings.ShowNavigationBar;
@@ -149,7 +165,10 @@ namespace Yozolab.Tabstep
             float top = toolbarHeight * (showNav ? 2 : 1);
             var content = new Rect(0, top, position.width, position.height - top);
             if (content.height > 0)
-                _host.OnGUI(content);
+                // The navigation bar replaces the browser's path header (and, when the
+                // Harmony patches are active, its whole toolbar) — only while it's shown,
+                // so a path display and search always remain available.
+                _host.OnGUI(content, showNav);
         }
 
         // ---- browser <-> tab sync --------------------------------------------
@@ -279,6 +298,37 @@ namespace Yozolab.Tabstep
             else if ((ctrl && e.keyCode == KeyCode.L) || (e.alt && e.keyCode == KeyCode.D))
             {
                 BeginPathEdit();
+                e.Use();
+            }
+            else if (ctrl && e.keyCode == KeyCode.F &&
+                     TabstepSettings.ShowNavigationBar && ProjectBrowserPatcher.Active)
+            {
+                // Only when the search field lives in our bar; otherwise the browser's
+                // own toolbar handles Ctrl+F itself.
+                (_searchField ??= new SearchField()).SetFocus();
+                e.Use();
+                Repaint();
+            }
+        }
+
+        /// <summary>
+        /// Mouse side (thumb) buttons go back/forward in the active tab's history, like a
+        /// web browser. Runs before the embedded browser so presses anywhere in the window
+        /// count; buttons 3/4 are XButton1/XButton2 in IMGUI events.
+        /// </summary>
+        void HandleMouseNavigation()
+        {
+            if (!TabstepSettings.MouseSideButtonsNavigate) return;
+            var e = Event.current;
+            if (e.type != EventType.MouseDown) return;
+            if (e.button == 3)
+            {
+                GoBack();
+                e.Use();
+            }
+            else if (e.button == 4)
+            {
+                GoForward();
                 e.Use();
             }
         }
@@ -595,6 +645,9 @@ namespace Yozolab.Tabstep
         void DrawNavigationBar()
         {
             var tab = _session.ActiveTab;
+            // With the Harmony patches the browser's toolbar is gone; its create button
+            // and search field live in this bar instead.
+            bool integrated = ProjectBrowserPatcher.Active;
             EditorGUILayout.BeginHorizontal(EditorStyles.toolbar);
 
             using (new EditorGUI.DisabledScope(tab == null || !tab.CanGoBack))
@@ -611,16 +664,72 @@ namespace Yozolab.Tabstep
                         GUILayout.Width(26)))
                     GoUp();
 
+            if (integrated) DrawCreateButton();
+
             GUILayout.Space(4);
-            // The rest of the row is the Explorer-style address bar.
+            // The middle of the row is the Explorer-style address bar.
             var addressRect = GUILayoutUtility.GetRect(GUIContent.none, GUIStyle.none,
                 GUILayout.ExpandWidth(true), GUILayout.Height(EditorStyles.toolbar.fixedHeight));
             GUILayout.Space(4);
+
+            if (integrated)
+            {
+                DrawSearchField();
+                GUILayout.Space(2);
+            }
+
             EditorGUILayout.EndHorizontal();
 
             addressRect.y += 1;
             addressRect.height -= 3;
             DrawAddressBar(addressRect, tab);
+        }
+
+        /// <summary>The stock toolbar's "+" dropdown: the Assets/Create menu.</summary>
+        void DrawCreateButton()
+        {
+            var content = new GUIContent(EditorGUIUtility.IconContent("CreateAddNew"))
+            {
+                tooltip = "Create assets in the current folder",
+            };
+            var style = GUI.skin.FindStyle("ToolbarCreateAddNewDropDown") ?? EditorStyles.toolbarDropDown;
+            // Natural content size only — the style stretches, and unlike the stock
+            // toolbar there is no FlexibleSpace here to absorb the slack.
+            var rect = GUILayoutUtility.GetRect(content, style, GUILayout.ExpandWidth(false));
+            if (EditorGUI.DropdownButton(rect, content, FocusType.Passive, style))
+            {
+                GUIUtility.hotControl = 0;
+                // Create menu items target the last interacted Project browser's folder —
+                // make sure that's ours, since this click never reaches the browser.
+                _host.MarkAsLastInteracted();
+                EditorUtility.DisplayPopupMenu(rect, "Assets/Create", null);
+            }
+        }
+
+        /// <summary>
+        /// The stock toolbar's search field, driving the embedded browser's filter
+        /// (same "t: l: ..." syntax). The browser stays the source of truth.
+        /// </summary>
+        void DrawSearchField()
+        {
+            // Mirror external changes (the search header's clear button, scripts...)
+            // unless they're just the normalized echo of our own SetSearch.
+            var browserText = _host.GetSearchText();
+            if (browserText != null && browserText != _lastAppliedSearch)
+            {
+                _searchText = browserText;
+                _lastAppliedSearch = browserText;
+            }
+
+            _searchField ??= new SearchField();
+            var edited = _searchField.OnToolbarGUI(_searchText,
+                GUILayout.MinWidth(65), GUILayout.MaxWidth(300));
+            if (edited == _searchText) return;
+            _searchText = edited;
+            _host.SetSearch(edited);
+            // SetSearch round-trips the text through the filter; remember the normalized
+            // form so next frame's mirror check doesn't stomp what the user is typing.
+            _lastAppliedSearch = _host.GetSearchText() ?? edited;
         }
 
         /// <summary>
