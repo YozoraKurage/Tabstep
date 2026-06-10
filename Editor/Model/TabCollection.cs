@@ -79,8 +79,21 @@ namespace Yozolab.Tabstep
         /// </summary>
         public bool CloseTab(int index)
         {
-            if (index < 0 || index >= _tabs.Count) return false;
-            var closed = _tabs[index];
+            var closed = DetachTab(index);
+            if (closed == null) return false;
+            OnTabClosed(closed);
+            return true;
+        }
+
+        /// <summary>
+        /// Removes the tab without the close bookkeeping (no recently-closed entry) —
+        /// for moving it somewhere else, e.g. into another window. Activation moves
+        /// like a close. Null for an invalid index.
+        /// </summary>
+        public TTab DetachTab(int index)
+        {
+            if (index < 0 || index >= _tabs.Count) return null;
+            var tab = _tabs[index];
             _tabs.RemoveAt(index);
             if (_tabs.Count == 0)
                 _activeIndex = -1;
@@ -88,8 +101,7 @@ namespace Yozolab.Tabstep
                 _activeIndex--;
             else if (_activeIndex >= _tabs.Count)
                 _activeIndex = _tabs.Count - 1;
-            OnTabClosed(closed);
-            return true;
+            return tab;
         }
 
         /// <summary>Closes every tab except the given one and the close-exempt (pinned) ones.</summary>

@@ -280,6 +280,47 @@ namespace Yozolab.Tabstep.Tests
         }
 
         [Test]
+        public void DetachTab_RemovesWithoutRememberingAsClosed()
+        {
+            var session = SessionWith("Assets", "Assets/A", "Assets/B");
+            session.Activate(1);
+            var detached = session.DetachTab(1);
+            Assert.AreEqual("Assets/A", detached.CurrentPath);
+            Assert.AreEqual(2, session.Count);
+            Assert.IsFalse(session.HasClosedTabs);
+            // Activation moves like a close: the right neighbour takes over.
+            Assert.AreEqual("Assets/B", session.ActiveTab.CurrentPath);
+        }
+
+        [Test]
+        public void DetachTab_InvalidIndex_ReturnsNull()
+        {
+            var session = SessionWith("Assets");
+            Assert.IsNull(session.DetachTab(-1));
+            Assert.IsNull(session.DetachTab(1));
+            Assert.AreEqual(1, session.Count);
+        }
+
+        [Test]
+        public void Clone_CopiesTabsHistoryPinsAndActiveIndex_Independently()
+        {
+            var session = SessionWith("Assets", "Assets/A", "Assets/B");
+            session.Tabs[2].Navigate("Assets/B/C");
+            session.SetPinned(0, true);
+            session.Activate(2);
+
+            var clone = session.Clone();
+            CollectionAssert.AreEqual(TabPaths(session), TabPaths(clone));
+            Assert.AreEqual(2, clone.ActiveIndex);
+            Assert.IsTrue(clone.Tabs[0].Pinned);
+            Assert.IsTrue(clone.Tabs[2].CanGoBack);
+
+            // Deep copy: navigating the clone leaves the source untouched.
+            clone.Tabs[2].Navigate("Assets");
+            Assert.AreEqual("Assets/B/C", session.Tabs[2].CurrentPath);
+        }
+
+        [Test]
         public void RecentlyClosed_PeeksMostRecentLast()
         {
             var session = SessionWith("Assets", "Assets/A");

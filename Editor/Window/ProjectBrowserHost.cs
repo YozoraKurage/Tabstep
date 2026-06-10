@@ -31,7 +31,14 @@ namespace Yozolab.Tabstep
             typeof(EditorWindow).GetField("m_Pos", BindingFlags.Instance | BindingFlags.NonPublic);
 
         static readonly MethodInfo OnGUIMethod = FindMethod("OnGUI", 0);
-        static readonly MethodInfo InitIfNeededMethod = FindMethod("InitIfNeeded", 0);
+
+        // Builds the browser's internals (search filter, drop lists, tree views).
+        // Older Unity versions call it InitIfNeeded; 2022 renamed it to Init (guarded
+        // by Initialized()). It must run before SetTwoColumns / SetFolderSelection:
+        // both dereference structures it creates (m_AssetLabels, m_FolderTree...) and
+        // throw NullReferenceException on a fresh, never-painted browser otherwise.
+        static readonly MethodInfo InitMethod = FindMethod("InitIfNeeded", 0) ?? FindMethod("Init", 0);
+
         static readonly MethodInfo GetActiveFolderPathMethod = FindMethod("GetActiveFolderPath", 0);
         static readonly MethodInfo SetTwoColumnsMethod = FindMethod("SetTwoColumns", 0);
 
@@ -120,7 +127,11 @@ namespace Yozolab.Tabstep
             // Opt this instance into the compact-layout Harmony patches (no-op without Harmony).
             ProjectBrowserPatcher.Register(_browser);
             AttachToOwner();
-            Invoke(InitIfNeededMethod);
+            // Init sizes its panes from `position`, so swap the placeholder rect a
+            // fresh instance carries for the owner's size before running it.
+            var size = _owner.position.size;
+            PosField.SetValue(_browser, new Rect(0, 0, Mathf.Max(size.x, 200f), Mathf.Max(size.y, 100f)));
+            Invoke(InitMethod);
             // Tabs target folders, which only the two-column mode can display directly.
             Invoke(SetTwoColumnsMethod);
             return true;
@@ -333,7 +344,7 @@ namespace Yozolab.Tabstep
             if (string.IsNullOrEmpty(projectPath) || !AssetDatabase.IsValidFolder(projectPath)) return false;
             var folder = AssetDatabase.LoadAssetAtPath<Object>(projectPath);
             if (folder == null) return false;
-            Invoke(InitIfNeededMethod);
+            Invoke(InitMethod);
             Invoke(SetFolderSelectionMethod, new[] { folder.GetInstanceID() }, false);
             return true;
         }

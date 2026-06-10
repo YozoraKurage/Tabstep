@@ -14,6 +14,8 @@ namespace Yozolab.Tabstep
     /// The Tabstep Shelf: a small float window that parks objects mid-flight. Drop
     /// assets (or scene objects) on it, then drag them back out onto another tab, an
     /// Inspector object field, the scene — anywhere Unity drag &amp; drop reaches.
+    /// Shift-click selects a range (Ctrl/Cmd-click toggles) and dragging any selected
+    /// row carries the whole selection out in one drag.
     ///
     /// A regular floating EditorWindow, treated exactly like the Tabstep window
     /// itself: it moves by its own title tab, floats above the main editor window
@@ -24,12 +26,16 @@ namespace Yozolab.Tabstep
     ///
     /// With the One-Shot preference on, dragging an item out consumes it: the item
     /// disappears when the drag leaves the shelf and comes back only if the same drag
-    /// re-enters and drops it back.
+    /// re-enters and drops it back. The padlock at the left edge of a row exempts the
+    /// item from that (and from "Clear"), and keeps it on the shelf for the rest of
+    /// the editor session — locked items are stored in SessionState and restored even
+    /// if the shelf window itself is closed and reopened.
     /// </summary>
     class TabstepShelfWindow : EditorWindow
     {
         const string DragKey = "Tabstep.ShelfDrag";
-        const string AllKey = "*"; // generic-data value for the drag-all handle
+        const string KeySeparator = "\n"; // joins item keys in the drag's generic data
+        const string LockedSessionKey = "Tabstep.Shelf.LockedItems";
         const float RowHeight = 22f;
         static readonly Vector2 DefaultSize = new Vector2(230, 190);
 
@@ -40,7 +46,12 @@ namespace Yozolab.Tabstep
 
         Vector2 _scroll;
         ShelfItem _mouseDownItem;
-        bool _dragAllArmed;
+        // Multi-selection: keys of the selected items, the shift-range anchor, and the
+        // item a plain click should collapse the selection to on mouse-up (unless the
+        // press turned into a drag first).
+        readonly HashSet<string> _selectedKeys = new HashSet<string>();
+        string _anchorKey;
+        string _collapseKey;
         // One-shot bookkeeping: the item(s) consumed by the current drag-out, restored
         // if the very same drag re-enters the shelf and drops.
         readonly List<ShelfItem> _draggedOut = new List<ShelfItem>();
@@ -209,6 +220,7 @@ namespace Yozolab.Tabstep
             titleContent = new GUIContent("Tabstep Shelf");
             minSize = new Vector2(160, 100);
             wantsMouseMove = true;
+            RestoreLockedItems();
         }
 
         void OnDisable()
@@ -233,93 +245,57 @@ namespace Yozolab.Tabstep
             DrawItems();
         }
 
+        // ---- locked-item session persistence ------------------------------------
+
+        [System.Serializable]
+        class LockedItemList
+        {
+            public List<ShelfItem> items = new List<ShelfItem>();
+        }
+
+        /// <summary>
+        /// Locked items live in SessionState too, so they outlast the window itself
+        /// (closed and reopened) for the duration of the editor session.
+        /// </summary>
+        void SaveLockedItems()
+        {
+            var list = new LockedItemList { items = _items.FindAll(item => item.Locked) };
+            if (list.items.Count == 0) SessionState.EraseString(LockedSessionKey);
+            else SessionState.SetString(LockedSessionKey, JsonUtility.ToJson(list));
+        }
+
+        void RestoreLockedItems()
+        {
+            var json = SessionState.GetString(LockedSessionKey, null);
+            if (string.IsNullOrEmpty(json)) return;
+            var list = JsonUtility.FromJson<LockedItemList>(json);
+            if (list?.items == null) return;
+            foreach (var item in list.items)
+            {
+                if (item == null || string.IsNullOrEmpty(item.Key)) continue;
+                if (_items.Exists(existing => existing.Key == item.Key)) continue;
+                _items.Add(item);
+            }
+        }
+
         // ---- chrome ------------------------------------------------------------
 
         /// <summary>Toolbar row — moving and closing belong to the window's own tab.</summary>
         void DrawHeader()
         {
             EditorGUILayout.BeginHorizontal(EditorStyles.toolbar);
-            DrawDragAllHandle();
             GUILayout.FlexibleSpace();
-            DrawMoveToTabButton();
             _keepOpen = GUILayout.Toggle(_keepOpen,
                 new GUIContent("Pin", "Keep the shelf open when the Tabstep window closes"),
                 EditorStyles.toolbarButton, GUILayout.ExpandWidth(false));
-            using (new EditorGUI.DisabledScope(_items.Count == 0))
-                if (GUILayout.Button(new GUIContent("Clear", "Remove all items"),
+            using (new EditorGUI.DisabledScope(!_items.Exists(item => !item.Locked)))
+                if (GUILayout.Button(new GUIContent("Clear", "Remove all unlocked items"),
                         EditorStyles.toolbarButton, GUILayout.ExpandWidth(false)))
-                    _items.Clear();
+                {
+                    _items.RemoveAll(item => !item.Locked);
+                    _selectedKeys.RemoveWhere(key => !_items.Exists(item => item.Key == key));
+                }
             EditorGUILayout.EndHorizontal();
-        }
-
-        /// <summary>Drag this handle to carry every (living) item out in one drag.</summary>
-        void DrawDragAllHandle()
-        {
-            if (_items.Count == 0) return;
-            var content = new GUIContent("≡", "Drag all items out at once");
-            var rect = GUILayoutUtility.GetRect(content, EditorStyles.toolbarButton, GUILayout.Width(24));
-            GUI.Label(rect, content, EditorStyles.toolbarButton);
-            var e = Event.current;
-            switch (e.type)
-            {
-                case EventType.MouseDown when e.button == 0 && rect.Contains(e.mousePosition):
-                    _dragAllArmed = true;
-                    e.Use();
-                    break;
-                case EventType.MouseUp:
-                    _dragAllArmed = false;
-                    break;
-                case EventType.MouseDrag when _dragAllArmed:
-                    _dragAllArmed = false;
-                    StartDragAll();
-                    e.Use();
-                    break;
-            }
-        }
-
-        void StartDragAll()
-        {
-            var objects = new List<Object>();
-            var paths = new List<string>();
-            foreach (var item in _items)
-            {
-                var obj = item.Resolve();
-                if (obj == null) continue;
-                objects.Add(obj);
-                if (item.AssetPath != null) paths.Add(item.AssetPath);
-            }
-            if (objects.Count == 0) return;
-            _draggedOut.Clear();
-            _draggedOutKey = null;
-            DragAndDrop.PrepareStartDrag();
-            DragAndDrop.objectReferences = objects.ToArray();
-            if (paths.Count > 0) DragAndDrop.paths = paths.ToArray();
-            DragAndDrop.SetGenericData(DragKey, AllKey);
-            DragAndDrop.StartDrag($"Shelf ({objects.Count} items)");
-        }
-
-        /// <summary>Hands every asset item over to the active Tabstep tab's folder.</summary>
-        void DrawMoveToTabButton()
-        {
-            var windows = Resources.FindObjectsOfTypeAll<TabstepProjectWindow>();
-            var target = windows.Length > 0 ? windows[0] : null;
-            var assetPaths = new List<string>();
-            foreach (var item in _items)
-                if (item.AssetPath != null && item.Resolve() != null)
-                    assetPaths.Add(item.AssetPath);
-            using (new EditorGUI.DisabledScope(target == null || target.ActiveFolderPath == null ||
-                                               assetPaths.Count == 0))
-            {
-                if (!GUILayout.Button(new GUIContent("→ Tab",
-                            "Move all asset items into the active tab's folder"),
-                        EditorStyles.toolbarButton, GUILayout.ExpandWidth(false)))
-                    return;
-                var folder = target.ActiveFolderPath;
-                if (target.MoveAssetsToActiveFolder(assetPaths) > 0)
-                    // Hand-off complete: drop everything that now lives in that folder.
-                    _items.RemoveAll(item => item.AssetPath != null &&
-                                             ProjectPaths.GetParent(item.AssetPath) == folder);
-            }
         }
 
         // ---- items -------------------------------------------------------------
@@ -348,26 +324,39 @@ namespace Yozolab.Tabstep
                 }
             }
             EditorGUILayout.EndScrollView();
+
+            // A left-click that no row claimed lands on empty space: drop the selection.
+            var e = Event.current;
+            if (e.type == EventType.MouseDown && e.button == 0 && _selectedKeys.Count > 0)
+            {
+                _selectedKeys.Clear();
+                _anchorKey = null;
+                Repaint();
+            }
         }
 
         bool DrawItem(ShelfItem item)
         {
             var rect = GUILayoutUtility.GetRect(GUIContent.none, GUIStyle.none,
                 GUILayout.ExpandWidth(true), GUILayout.Height(RowHeight));
+            var lockRect = new Rect(rect.x + 3, rect.y + (rect.height - 14) / 2, 14, 14);
             var removeRect = new Rect(rect.xMax - 20, rect.y + (rect.height - 16) / 2, 16, 16);
             var obj = item.Resolve();
             bool alive = obj != null;
+            bool selected = _selectedKeys.Contains(item.Key);
 
             var e = Event.current;
             if (e.type == EventType.Repaint)
             {
-                if (rect.Contains(e.mousePosition))
+                if (selected)
+                    EditorGUI.DrawRect(rect, new Color(0.24f, 0.49f, 0.91f, 0.35f));
+                else if (rect.Contains(e.mousePosition))
                     EditorGUI.DrawRect(rect, new Color(0.5f, 0.7f, 1f, 0.15f));
                 var icon = alive ? AssetPreview.GetMiniThumbnail(obj) : null;
                 if (icon != null)
-                    GUI.DrawTexture(new Rect(rect.x + 4, rect.y + (rect.height - 16) / 2, 16, 16),
+                    GUI.DrawTexture(new Rect(rect.x + 21, rect.y + (rect.height - 16) / 2, 16, 16),
                         icon, ScaleMode.ScaleToFit);
-                var labelRect = new Rect(rect.x + 24, rect.y, rect.width - 48, rect.height);
+                var labelRect = new Rect(rect.x + 41, rect.y, rect.width - 65, rect.height);
                 var style = alive ? EditorStyles.label : EditorStyles.centeredGreyMiniLabel;
                 var label = alive ? item.DisplayName : item.DisplayName + " (missing)";
                 GUI.Label(labelRect, new GUIContent(label, item.AssetPath ?? label), style);
@@ -375,16 +364,33 @@ namespace Yozolab.Tabstep
             if (e.type == EventType.MouseMove && rect.Contains(e.mousePosition))
                 Repaint();
 
-            if (GUI.Button(removeRect, new GUIContent("×", "Remove from the shelf"), EditorStyles.miniLabel))
+            // The same padlock the Inspector uses; only visible when locked or hovered.
+            bool locked = GUI.Toggle(lockRect, item.Locked,
+                new GUIContent("", item.Locked
+                    ? "Unlock"
+                    : "Lock — keep on the shelf for this editor session"),
+                "IN LockButton");
+            if (locked != item.Locked)
             {
-                _items.Remove(item);
-                return false;
+                item.Locked = locked;
+                SaveLockedItems();
             }
+
+            using (new EditorGUI.DisabledScope(item.Locked))
+                if (GUI.Button(removeRect,
+                        new GUIContent("×", item.Locked ? "Unlock to remove" : "Remove from the shelf"),
+                        EditorStyles.miniLabel))
+                {
+                    _items.Remove(item);
+                    _selectedKeys.Remove(item.Key);
+                    return false;
+                }
 
             switch (e.type)
             {
                 case EventType.MouseDown when e.button == 0 && rect.Contains(e.mousePosition):
                     _mouseDownItem = item;
+                    UpdateSelectionOnMouseDown(item, e);
                     e.Use();
                     break;
                 case EventType.MouseDown when e.button == 1 && rect.Contains(e.mousePosition):
@@ -392,22 +398,98 @@ namespace Yozolab.Tabstep
                     ShowItemContextMenu(item, obj);
                     break;
                 case EventType.MouseUp:
+                    // A plain click released without dragging collapses the selection
+                    // to the pressed item (the press alone must not, or multi-drags
+                    // die). Every row sees the MouseUp, so this keys off _collapseKey
+                    // alone — _mouseDownItem may already be nulled by an earlier row.
+                    if (_collapseKey != null)
+                    {
+                        _selectedKeys.Clear();
+                        _selectedKeys.Add(_collapseKey);
+                        _collapseKey = null;
+                        Repaint();
+                    }
                     _mouseDownItem = null;
                     break;
                 case EventType.MouseDrag when _mouseDownItem == item && alive:
                     _mouseDownItem = null;
-                    _draggedOut.Clear();
-                    _draggedOutKey = null;
-                    DragAndDrop.PrepareStartDrag();
-                    DragAndDrop.objectReferences = new[] { obj };
-                    var path = item.AssetPath;
-                    if (path != null) DragAndDrop.paths = new[] { path };
-                    DragAndDrop.SetGenericData(DragKey, item.Key);
-                    DragAndDrop.StartDrag(item.DisplayName);
+                    _collapseKey = null;
+                    StartItemDrag(item);
                     e.Use();
                     break;
             }
             return true;
+        }
+
+        /// <summary>
+        /// Click selects, Shift-click extends a range from the anchor, Ctrl/Cmd-click
+        /// toggles. A plain press on an already-selected row keeps the selection so it
+        /// can be dragged out together.
+        /// </summary>
+        void UpdateSelectionOnMouseDown(ShelfItem item, Event e)
+        {
+            _collapseKey = null;
+            if (e.shift && _anchorKey != null)
+            {
+                int anchor = _items.FindIndex(existing => existing.Key == _anchorKey);
+                int target = _items.FindIndex(existing => existing.Key == item.Key);
+                if (anchor < 0) anchor = target;
+                _selectedKeys.Clear();
+                for (int i = Mathf.Min(anchor, target); i <= Mathf.Max(anchor, target); i++)
+                    _selectedKeys.Add(_items[i].Key);
+            }
+            else if (EditorGUI.actionKey)
+            {
+                if (!_selectedKeys.Add(item.Key)) _selectedKeys.Remove(item.Key);
+                _anchorKey = item.Key;
+            }
+            else
+            {
+                if (_selectedKeys.Contains(item.Key))
+                {
+                    // Defer collapsing until mouse-up; this press may become a drag.
+                    _collapseKey = item.Key;
+                }
+                else
+                {
+                    _selectedKeys.Clear();
+                    _selectedKeys.Add(item.Key);
+                }
+                _anchorKey = item.Key;
+            }
+            Repaint();
+        }
+
+        /// <summary>
+        /// Drags the pressed item out — together with the rest of the selection when
+        /// the pressed item is part of it.
+        /// </summary>
+        void StartItemDrag(ShelfItem pressed)
+        {
+            var dragItems = _selectedKeys.Contains(pressed.Key) && _selectedKeys.Count > 1
+                ? _items.FindAll(item => _selectedKeys.Contains(item.Key))
+                : new List<ShelfItem> { pressed };
+            var objects = new List<Object>();
+            var paths = new List<string>();
+            var keys = new List<string>();
+            foreach (var item in dragItems)
+            {
+                var obj = item.Resolve();
+                if (obj == null) continue;
+                objects.Add(obj);
+                keys.Add(item.Key);
+                if (item.AssetPath != null) paths.Add(item.AssetPath);
+            }
+            if (objects.Count == 0) return;
+            _draggedOut.Clear();
+            _draggedOutKey = null;
+            DragAndDrop.PrepareStartDrag();
+            DragAndDrop.objectReferences = objects.ToArray();
+            if (paths.Count > 0) DragAndDrop.paths = paths.ToArray();
+            DragAndDrop.SetGenericData(DragKey, string.Join(KeySeparator, keys));
+            DragAndDrop.StartDrag(objects.Count == 1
+                ? objects[0].name
+                : $"Shelf ({objects.Count} items)");
         }
 
         /// <summary>
@@ -447,11 +529,21 @@ namespace Yozolab.Tabstep
                     () => ComponentUtility.CopyComponent(component));
             }
             menu.AddSeparator("");
-            menu.AddItem(new GUIContent("Remove"), false, () =>
+            menu.AddItem(new GUIContent(item.Locked ? "Unlock" : "Lock"), item.Locked, () =>
             {
-                _items.Remove(item);
+                item.Locked = !item.Locked;
+                SaveLockedItems();
                 Repaint();
             });
+            if (item.Locked)
+                menu.AddDisabledItem(new GUIContent("Remove"));
+            else
+                menu.AddItem(new GUIContent("Remove"), false, () =>
+                {
+                    _items.Remove(item);
+                    _selectedKeys.Remove(item.Key);
+                    Repaint();
+                });
             menu.ShowAsContext();
         }
 
@@ -518,9 +610,9 @@ namespace Yozolab.Tabstep
             if (!TabstepSettings.ShelfOneShot) return;
             var key = DragAndDrop.GetGenericData(DragKey) as string;
             if (key == null) return;
-            var taken = key == AllKey
-                ? new List<ShelfItem>(_items)
-                : _items.FindAll(existing => existing.Key == key);
+            var keys = new HashSet<string>(key.Split(KeySeparator[0]));
+            // Locked items are exempt: they stay on the shelf however often they leave.
+            var taken = _items.FindAll(existing => keys.Contains(existing.Key) && !existing.Locked);
             if (taken.Count == 0) return;
             foreach (var item in taken)
                 _items.Remove(item);
