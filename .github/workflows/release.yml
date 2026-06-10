@@ -88,6 +88,7 @@ jobs:
         uses: "softprops/action-gh-release@v2"
         if: ${{ steps.build.outputs.package-version != '0.0.0' }}
         with:
+          token: ${{ secrets.GITHUB_TOKEN }}
           tag_name: ${{ steps.version.outputs.version }}
           target_commitish: ${{ github.event.pull_request.base.ref || github.ref_name }}
           draft: false
