@@ -1,0 +1,17 @@
+{
+  "name": "net.yozolab.tabstep",
+  "version": "0.1.0",
+  "displayName": "Tabstep",
+  "description": "Tabbed Project window for Unity. Hosts the stock Project browser and adds Windows Explorer style tabs, back/forward history, breadcrumbs and keyboard navigation.",
+  "unity": "2022.3",
+  "author": {
+    "name": "Yozolab"
+  },
+  "keywords": [
+    "project",
+    "browser",
+    "tabs",
+    "explorer",
+    "editor"
+  ]
+}
