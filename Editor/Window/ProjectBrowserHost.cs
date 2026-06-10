@@ -12,7 +12,8 @@ namespace Yozolab.Tabstep
     /// Hosts an instance of Unity's internal ProjectBrowser (the stock Project window)
     /// inside another EditorWindow. ProjectBrowser is internal, so instead of inheriting
     /// it directly this wrapper instantiates it and delegates OnGUI via reflection —
-    /// the embedded pane is the real Project window, including its toolbar and search.
+    /// the embedded pane is the real Project window. Its toolbar and path header can be
+    /// folded away into the host's own bar (see <see cref="ProjectBrowserPatcher"/>).
     ///
     /// Everything reflective is null-guarded: if a future Unity version renames a member,
     /// <see cref="IsAvailable"/> turns false and the window shows a fallback message
@@ -20,7 +21,7 @@ namespace Yozolab.Tabstep
     /// </summary>
     class ProjectBrowserHost : IDisposable
     {
-        static readonly Type BrowserType =
+        internal static readonly Type BrowserType =
             typeof(UnityEditor.Editor).Assembly.GetType("UnityEditor.ProjectBrowser");
 
         static readonly FieldInfo ParentField =
@@ -33,6 +34,36 @@ namespace Yozolab.Tabstep
         static readonly MethodInfo InitIfNeededMethod = FindMethod("InitIfNeeded", 0);
         static readonly MethodInfo GetActiveFolderPathMethod = FindMethod("GetActiveFolderPath", 0);
         static readonly MethodInfo SetTwoColumnsMethod = FindMethod("SetTwoColumns", 0);
+
+        // Optional members for hiding the browser's own "Assets > ..." path header
+        // (Tabstep's address bar replaces it). Missing members just leave it visible.
+        static readonly FieldInfo ListHeaderRectField =
+            BrowserType?.GetField("m_ListHeaderRect", BindingFlags.Instance | BindingFlags.NonPublic);
+
+        static readonly FieldInfo ListAreaRectField =
+            BrowserType?.GetField("m_ListAreaRect", BindingFlags.Instance | BindingFlags.NonPublic);
+
+        static readonly FieldInfo SearchFilterField =
+            BrowserType?.GetField("m_SearchFilter", BindingFlags.Instance | BindingFlags.NonPublic);
+
+        static readonly MethodInfo IsSearchingMethod =
+            SearchFilterField?.FieldType.GetMethod("IsSearching", BindingFlags.Instance | BindingFlags.Public);
+
+        // Optional members bridging the browser's search into the host's own toolbar
+        // (used while ProjectBrowserPatcher hides the stock toolbar).
+        static readonly MethodInfo SetSearchMethod = BrowserType?
+            .GetMethods(BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public)
+            .FirstOrDefault(m =>
+            {
+                if (m.Name != "SetSearch") return false;
+                var p = m.GetParameters();
+                return p.Length == 1 && p[0].ParameterType == typeof(string);
+            });
+
+        static readonly PropertyInfo SearchTextProperty =
+            BrowserType?.GetProperty("searchText", BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public);
+
+        static readonly MethodInfo SetAsLastInteractedMethod = FindMethod("SetAsLastInteractedProjectBrowser", 0);
 
         // internal void SetFolderSelection(int[] selectedInstanceIDs, bool revealSelectionAndFrameLastSelected)
         static readonly MethodInfo SetFolderSelectionMethod = BrowserType?
@@ -69,6 +100,7 @@ namespace Yozolab.Tabstep
         {
             if (_browser != null)
             {
+                ProjectBrowserPatcher.Unregister(_browser);
                 // Detach the borrowed host view before destruction so teardown code
                 // never mistakes the browser for a real docked window.
                 ParentField?.SetValue(_browser, null);
@@ -85,6 +117,8 @@ namespace Yozolab.Tabstep
             if (_browser == null) return false;
             // Never saved into the layout file — the host window owns and recreates it.
             _browser.hideFlags = HideFlags.HideAndDontSave;
+            // Opt this instance into the compact-layout Harmony patches (no-op without Harmony).
+            ProjectBrowserPatcher.Register(_browser);
             AttachToOwner();
             Invoke(InitIfNeededMethod);
             // Tabs target folders, which only the two-column mode can display directly.
@@ -127,8 +161,17 @@ namespace Yozolab.Tabstep
             }
         }
 
-        /// <summary>Draws the embedded Project browser into <paramref name="rect"/> (window coordinates).</summary>
-        public void OnGUI(Rect rect)
+        /// <summary>
+        /// Draws the embedded Project browser into <paramref name="rect"/> (window coordinates).
+        /// With <paramref name="hidePathHeader"/> the browser's own chrome is reduced: when the
+        /// Harmony patches are active (<see cref="ProjectBrowserPatcher"/>) the toolbar and the
+        /// "Assets &gt; ..." header are gone entirely and their rows reclaimed. Otherwise this
+        /// falls back to neutralizing the header in place: its clicks are swallowed before the
+        /// browser sees them and its crumbs are painted over with the bar background — without
+        /// patching there is no seam inside the browser's single OnGUI to reclaim the height.
+        /// The header area doubles as the search header while searching, which stays untouched.
+        /// </summary>
+        public void OnGUI(Rect rect, bool hidePathHeader = false)
         {
             if (!EnsureBrowser()) return;
             AttachToOwner();
@@ -138,12 +181,124 @@ namespace Yozolab.Tabstep
             GUILayout.BeginArea(rect);
             try
             {
+                // With the Harmony patches active the header is zero-height while browsing,
+                // so the swallow/cover fallback below naturally no-ops. Without SetTwoColumns
+                // the browser fell back to one-column mode, where the header strip is
+                // occupied by the asset tree instead — leave it alone.
+                bool hideHeader = hidePathHeader && SetTwoColumnsMethod != null && !IsSearching(_browser);
+                if (hideHeader)
+                    SwallowPathHeaderEvents(PathHeaderRect()); // last frame's rect; stable between frames
                 Invoke(OnGUIMethod);
+                if (hideHeader)
+                    CoverPathHeader(PathHeaderRect());
+                if (hidePathHeader && ProjectBrowserPatcher.Active)
+                    DrawSplitterTopGap();
             }
             finally
             {
                 GUILayout.EndArea();
             }
+        }
+
+        /// <summary>
+        /// With the toolbar row reclaimed, the browser still draws the tree/list splitter
+        /// line from the old toolbar offset down — fill in the missing topmost stretch.
+        /// </summary>
+        void DrawSplitterTopGap()
+        {
+            if (Event.current.type != EventType.Repaint || ListAreaRectField == null) return;
+            var listArea = (Rect)ListAreaRectField.GetValue(_browser);
+            if (listArea.width <= 0f) return;
+            EditorGUI.DrawRect(new Rect(listArea.x, 0, 1, EditorStyles.toolbar.fixedHeight),
+                EditorGUIUtility.isProSkin ? new Color(0.12f, 0.12f, 0.12f) : new Color(0.6f, 0.6f, 0.6f));
+        }
+
+        // ---- built-in path header ("Assets > ...") -----------------------------
+
+        static GUIStyle _headerCoverStyle;
+
+        /// <summary>Header rect in browser-local coordinates (== area-local), zero when unknown.</summary>
+        Rect PathHeaderRect()
+        {
+            if (_browser == null || ListHeaderRectField == null) return Rect.zero;
+            return (Rect)ListHeaderRectField.GetValue(_browser);
+        }
+
+        /// <summary>True while <paramref name="browser"/> shows search results instead of a folder.</summary>
+        internal static bool IsSearching(object browser)
+        {
+            if (browser == null || SearchFilterField == null || IsSearchingMethod == null) return false;
+            try
+            {
+                var filter = SearchFilterField.GetValue(browser);
+                return filter != null && (bool)IsSearchingMethod.Invoke(filter, null);
+            }
+            catch
+            {
+                return false;
+            }
+        }
+
+        /// <summary>
+        /// Eats clicks aimed at the path header so its (visually hidden) crumbs stay inert.
+        /// MouseUp passes through: the crumbs never become the hot control without the down.
+        /// </summary>
+        static void SwallowPathHeaderEvents(Rect headerRect)
+        {
+            var e = Event.current;
+            if (headerRect.height <= 0f || !headerRect.Contains(e.mousePosition)) return;
+            if (e.type == EventType.MouseDown || e.type == EventType.ContextClick)
+                e.Use();
+        }
+
+        /// <summary>
+        /// Repaints the header's own bar background over its crumbs, leaving the bar empty
+        /// for the owner to draw into. Left edge inset keeps the tree/list splitter intact.
+        /// </summary>
+        static void CoverPathHeader(Rect headerRect)
+        {
+            if (Event.current.type != EventType.Repaint || headerRect.height <= 0f) return;
+            headerRect.xMin += 2;
+            _headerCoverStyle ??= GUI.skin.FindStyle("ProjectBrowserTopBarBg");
+            if (_headerCoverStyle != null)
+                _headerCoverStyle.Draw(headerRect, GUIContent.none, false, false, false, false);
+            else
+                EditorGUI.DrawRect(headerRect, EditorGUIUtility.isProSkin
+                    ? new Color(0.22f, 0.22f, 0.22f)
+                    : new Color(0.76f, 0.76f, 0.76f));
+        }
+
+        // ---- search bridge (the host toolbar owns the field when patched) -------
+
+        /// <summary>The browser's current search text, or null when unknown.</summary>
+        public string GetSearchText()
+        {
+            if (_browser == null || SearchTextProperty == null) return null;
+            try
+            {
+                return SearchTextProperty.GetValue(_browser) as string;
+            }
+            catch
+            {
+                return null;
+            }
+        }
+
+        /// <summary>Applies search text to the embedded browser (same syntax as the stock field).</summary>
+        public void SetSearch(string text)
+        {
+            if (!EnsureBrowser()) return;
+            Invoke(SetSearchMethod, text ?? "");
+        }
+
+        /// <summary>
+        /// Marks the embedded browser as the "last interacted" Project browser, so
+        /// Assets/Create menu items target its current folder.
+        /// </summary>
+        public void MarkAsLastInteracted()
+        {
+            if (_browser == null) return;
+            Invoke(SetAsLastInteractedMethod);
         }
 
         /// <summary>Folder currently shown by the embedded browser, or null when unknown.</summary>
