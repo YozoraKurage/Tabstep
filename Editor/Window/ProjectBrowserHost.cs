@@ -72,6 +72,10 @@ namespace Yozolab.Tabstep
 
         static readonly MethodInfo SetAsLastInteractedMethod = FindMethod("SetAsLastInteractedProjectBrowser", 0);
 
+        // internal void FrameObject(int instanceID, bool ping) — scrolls the asset
+        // list/tree so the object is visible. Optional: missing just skips framing.
+        static readonly MethodInfo FrameObjectMethod = FindMethod("FrameObject", 2);
+
         // internal void SetFolderSelection(int[] selectedInstanceIDs, bool revealSelectionAndFrameLastSelected)
         static readonly MethodInfo SetFolderSelectionMethod = BrowserType?
             .GetMethods(BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public)
@@ -310,6 +314,19 @@ namespace Yozolab.Tabstep
         {
             if (_browser == null) return;
             Invoke(SetAsLastInteractedMethod);
+        }
+
+        /// <summary>True while the embedded browser shows search results instead of a folder.</summary>
+        public bool IsSearching()
+        {
+            return IsSearching(_browser);
+        }
+
+        /// <summary>Scrolls the embedded browser so the object is visible (no ping).</summary>
+        public void FrameObject(int instanceID)
+        {
+            if (_browser == null) return;
+            Invoke(FrameObjectMethod, instanceID, false);
         }
 
         /// <summary>

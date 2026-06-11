@@ -22,7 +22,9 @@ namespace Yozolab.Tabstep
     /// Alt+Left/Right or mouse side buttons back/forward, Alt+Up parent folder,
     /// Ctrl+L / Alt+D edit the path, Ctrl+F focus the search field,
     /// Ctrl+Shift+C copy the absolute path, Ctrl+Shift+D summon the shelf
-    /// to the mouse (adding the selection).
+    /// to the mouse (adding the selection). With WASD navigation enabled
+    /// (Preferences) the bare W/S keys step the selection through the shown
+    /// folder, D opens the selected folder/asset and A goes back.
     /// </summary>
     public class TabstepProjectWindow : EditorWindow
     {
@@ -571,6 +573,128 @@ namespace Yozolab.Tabstep
                 e.Use();
                 Repaint();
             }
+            else if (CanHandleWasdKey(e))
+            {
+                HandleWasdKey(e);
+            }
+        }
+
+        // ---- WASD selection navigation ------------------------------------------
+
+        /// <summary>
+        /// Bare W/A/S/D only, and never while the user is typing — renaming an asset,
+        /// the search field and the path bar all put IMGUI into text editing mode.
+        /// </summary>
+        bool CanHandleWasdKey(Event e)
+        {
+            if (!TabstepSettings.WasdSelectionNavigation) return false;
+            if (e.control || e.command || e.alt || e.shift) return false;
+            if (_editingPath || EditorGUIUtility.editingTextField) return false;
+            return e.keyCode == KeyCode.W || e.keyCode == KeyCode.A ||
+                   e.keyCode == KeyCode.S || e.keyCode == KeyCode.D;
+        }
+
+        /// <summary>
+        /// Explorer-on-the-home-row: W/S step the selection through the shown folder's
+        /// items, D opens the selected folder (or asset), A goes back through the
+        /// history — so D into a folder and A out of it are symmetric.
+        /// </summary>
+        void HandleWasdKey(Event e)
+        {
+            switch (e.keyCode)
+            {
+                case KeyCode.W:
+                    StepSelection(-1);
+                    break;
+                case KeyCode.S:
+                    StepSelection(+1);
+                    break;
+                case KeyCode.A:
+                    GoBack();
+                    break;
+                case KeyCode.D:
+                    OpenSelection();
+                    break;
+            }
+            e.Use();
+        }
+
+        /// <summary>Moves the selection to the previous/next item of the shown folder.</summary>
+        void StepSelection(int delta)
+        {
+            var folder = _session.ActiveTab?.CurrentPath;
+            // Search results follow the browser's own relevance order, which this
+            // folder-based stepping cannot reproduce — leave the keys inert there.
+            if (folder == null || _host.IsSearching()) return;
+            var items = FolderItems(folder);
+            var current = ProjectPaths.Normalize(AssetDatabase.GetAssetPath(Selection.activeObject));
+            var next = NextSelectionPath(items, current, delta);
+            if (next == null) return;
+            var asset = AssetDatabase.LoadMainAssetAtPath(next);
+            if (asset == null) return;
+            Selection.activeObject = asset;
+            _host.FrameObject(asset.GetInstanceID());
+            Repaint();
+        }
+
+        /// <summary>
+        /// Path to select when stepping by <paramref name="delta"/>, clamped at both
+        /// ends. A selection outside the list (or none) starts from the nearest end:
+        /// S picks the first item, W the last. Null only for an empty list.
+        /// </summary>
+        internal static string NextSelectionPath(List<string> items, string current, int delta)
+        {
+            if (items.Count == 0) return null;
+            int index = current == null ? -1 : items.IndexOf(current);
+            if (index < 0) return delta < 0 ? items[items.Count - 1] : items[0];
+            index = Math.Max(0, Math.Min(items.Count - 1, index + delta));
+            return items[index];
+        }
+
+        /// <summary>
+        /// Direct children of the folder in the browser's display order: subfolders
+        /// first, then assets, each naturally sorted.
+        /// </summary>
+        static List<string> FolderItems(string folder)
+        {
+            var items = new List<string>();
+            foreach (var sub in AssetDatabase.GetSubFolders(folder))
+            {
+                var path = ProjectPaths.Normalize(sub);
+                if (path != null) items.Add(path);
+            }
+            items.Sort(EditorUtility.NaturalCompare);
+
+            var assets = new List<string>();
+            var seen = new HashSet<string>();
+            foreach (var guid in AssetDatabase.FindAssets("", new[] { folder }))
+            {
+                var path = ProjectPaths.Normalize(AssetDatabase.GUIDToAssetPath(guid));
+                // FindAssets is recursive and lists folders too — keep direct files only.
+                if (path == null || !seen.Add(path)) continue;
+                if (ProjectPaths.GetParent(path) != folder) continue;
+                if (AssetDatabase.IsValidFolder(path)) continue;
+                assets.Add(path);
+            }
+            assets.Sort(EditorUtility.NaturalCompare);
+
+            items.AddRange(assets);
+            return items;
+        }
+
+        /// <summary>
+        /// Opens the selection: a folder navigates the active tab into it (recorded in
+        /// the history, so A backs out again), anything else opens like a double-click.
+        /// </summary>
+        void OpenSelection()
+        {
+            var obj = Selection.activeObject;
+            if (obj == null) return;
+            var path = ProjectPaths.Normalize(AssetDatabase.GetAssetPath(obj));
+            if (path != null && AssetDatabase.IsValidFolder(path))
+                NavigateTo(path);
+            else
+                AssetDatabase.OpenAsset(obj);
         }
 
         /// <summary>
