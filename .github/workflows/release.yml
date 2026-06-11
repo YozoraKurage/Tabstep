@@ -1,12 +1,21 @@
 name: "Release"
 
 # main へのプルリクがマージされたら自動実行。
-#   1. PR ラベル (major / minor / patch) から semver を判定し package.json を更新
-#   2. バージョン更新を main へコミット
+#   1. VPM リスティング通知用の PAT (LISTING_DISPATCH_TOKEN) を事前検証
+#      （トークン切れ・権限不足ならバージョン更新もリリースもせずに失敗させる）
+#   2. PR ラベル (major / minor / patch) から semver を判定し package.json を更新
 #   3. vpm-packager で .unitypackage / .zip を生成
-#   4. 生成パッケージを正式 Release として公開（タグ自動作成）
+#   4. ビルドが通ってからバージョン更新を main へコミット
+#   5. 生成パッケージを正式 Release として公開（タグ自動作成）
+#   6. VPM リスティングの再ビルドを repository_dispatch でトリガー
 #
-# 手動実行 (workflow_dispatch) も可能。その場合は bump 入力値で更新種別を指定する。
+# 途中のステップが失敗したら以降は実行されない: ビルド失敗ならバージョンは
+# 押されず、Release 作成失敗ならリスティング通知も飛ばない。
+#
+# 手動実行 (workflow_dispatch) も可能。bump 入力値で更新種別を指定する。
+# bump = "none" はバージョンを上げずに package.json の現行バージョンで
+# 再リリースする（Release 作成や通知だけが失敗したときの復旧用 —
+# 既存のタグ / Release があればアセットを上書き更新する）。
 #
 # このファイルはリポジトリ固有の値を含まない汎用ワークフロー。VPM パッケージ用の
 # どのリポジトリにもそのままコピーして使える（ビルド対象パッケージ名は vpm-packager が
@@ -18,7 +27,7 @@ on:
   workflow_dispatch:
     inputs:
       bump:
-        description: "Version bump type"
+        description: "Version bump type (none = re-release the current version)"
         required: true
         default: "patch"
         type: choice
@@ -26,9 +35,16 @@ on:
           - patch
           - minor
           - major
+          - none
 
 permissions:
   contents: write
+
+env:
+  # 再ビルド対象の VPM リスティングリポジトリ（全パッケージ共通）
+  LISTING_REPO: "YozoraKurage/vpmrepo-list"
+  # 全パッケージリポジトリで共通の dispatch イベント種別（notify-vpm-listing.yml と揃える）
+  DISPATCH_EVENT_TYPE: "vpm-package-release"
 
 jobs:
   release:
@@ -36,6 +52,42 @@ jobs:
     if: ${{ github.event_name == 'workflow_dispatch' || github.event.pull_request.merged == true }}
     runs-on: "ubuntu-latest"
     steps:
+      # 過去に「Release 公開後にリスティング通知だけが PAT の権限不足で失敗し、
+      # バージョンを無駄に上げて出し直す」事故があったため、副作用のあるステップを
+      # 走らせる前にトークンを検証する。チェック内容:
+      #   - secret が設定されているか
+      #   - トークンでリスティングリポジトリにアクセスできるか (期限切れ検知)
+      #   - push (write) 権限があるか — repository_dispatch に必要
+      #   - classic PAT の場合は repo スコープがあるか (fine-grained はヘッダ無し)
+      - name: "Verify VPM listing dispatch token"
+        env:
+          DISPATCH_TOKEN: ${{ secrets.LISTING_DISPATCH_TOKEN }}
+        run: |
+          if [ -z "$DISPATCH_TOKEN" ]; then
+            echo "::error::LISTING_DISPATCH_TOKEN secret is not set. Aborting before any release side effects."
+            exit 1
+          fi
+          status="$(curl -sS -o /tmp/listing-repo.json -D /tmp/listing-headers.txt -w '%{http_code}' \
+            -H "Accept: application/vnd.github+json" \
+            -H "Authorization: Bearer $DISPATCH_TOKEN" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            "https://api.github.com/repos/${LISTING_REPO}")"
+          if [ "$status" != "200" ]; then
+            echo "::error::LISTING_DISPATCH_TOKEN cannot access ${LISTING_REPO} (HTTP $status) — expired token or missing repository access."
+            exit 1
+          fi
+          push="$(jq -r '.permissions.push // false' /tmp/listing-repo.json)"
+          if [ "$push" != "true" ]; then
+            echo "::error::LISTING_DISPATCH_TOKEN has no write (push) permission on ${LISTING_REPO}; repository_dispatch would be rejected."
+            exit 1
+          fi
+          scopes="$(grep -i '^x-oauth-scopes:' /tmp/listing-headers.txt | cut -d: -f2- | tr -d ' \r' || true)"
+          if [ -n "$scopes" ] && ! printf ',%s,' "$scopes" | grep -q ',repo,'; then
+            echo "::error::LISTING_DISPATCH_TOKEN (classic PAT) lacks the 'repo' scope required for repository_dispatch. Current scopes: $scopes"
+            exit 1
+          fi
+          echo "Listing dispatch token OK (write access to ${LISTING_REPO} confirmed)."
+
       - name: "Checkout main"
         uses: "actions/checkout@v4"
         with:
@@ -63,20 +115,21 @@ jobs:
           echo "Selected bump type: $type"
           echo "type=$type" >> "$GITHUB_OUTPUT"
 
-      - name: "Bump package.json version"
+      # bump = none は package.json の現行バージョンをそのまま使う（再リリース）。
+      # それ以外はローカルでのみ更新し、コミットはビルド成功後に行う。
+      - name: "Resolve release version"
         id: "version"
         run: |
-          new_version="$(npm version "${{ steps.bump.outputs.type }}" --no-git-tag-version | sed 's/^v//')"
-          echo "Bumped to $new_version"
-          echo "version=$new_version" >> "$GITHUB_OUTPUT"
-
-      - name: "Commit version bump to main"
-        run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add package.json
-          git commit -m "chore: release ${{ steps.version.outputs.version }} [skip ci]"
-          git push origin HEAD:${{ github.event.pull_request.base.ref || github.ref_name }}
+          if [ "${{ steps.bump.outputs.type }}" = "none" ]; then
+            version="$(node -p "require('./package.json').version")"
+            echo "Re-releasing current version: $version"
+            echo "bumped=false" >> "$GITHUB_OUTPUT"
+          else
+            version="$(npm version "${{ steps.bump.outputs.type }}" --no-git-tag-version | sed 's/^v//')"
+            echo "Bumped to $version"
+            echo "bumped=true" >> "$GITHUB_OUTPUT"
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
 
       - name: "Build"
         id: "build"
@@ -84,7 +137,19 @@ jobs:
         with:
           args: "-z -u"
 
+      # ビルドが通ってからバージョンを main に積む — ビルド失敗でバージョンだけが
+      # 上がってしまう事故を防ぐ。bump = none のときは何も変わらないのでスキップ。
+      - name: "Commit version bump to main"
+        if: ${{ steps.version.outputs.bumped == 'true' }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add package.json
+          git commit -m "chore: release ${{ steps.version.outputs.version }} [skip ci]"
+          git push origin HEAD:${{ github.event.pull_request.base.ref || github.ref_name }}
+
       - name: "Create Release"
+        id: "release"
         uses: "softprops/action-gh-release@v2"
         if: ${{ steps.build.outputs.package-version != '0.0.0' }}
         with:
@@ -100,20 +165,14 @@ jobs:
       # この Release は GITHUB_TOKEN で作成されるため `release` イベントの
       # workflow は発火しない（GitHub の再帰防止仕様）。よって VPM リスティングの
       # 再ビルドはここから repository_dispatch で明示的にトリガーする。
-      # event_type は全パッケージ共通の "vpm-package-release"（notify-vpm-listing.yml と揃える）。
+      # Release が実際に作成できたときだけ通知する（トークン自体は冒頭で検証済み）。
       - name: "Trigger VPM listing rebuild"
-        if: ${{ steps.build.outputs.package-version != '0.0.0' }}
+        if: ${{ steps.release.outcome == 'success' }}
         env:
           DISPATCH_TOKEN: ${{ secrets.LISTING_DISPATCH_TOKEN }}
-          LISTING_REPO: "YozoraKurage/vpmrepo-list"
-          DISPATCH_EVENT_TYPE: "vpm-package-release"
           SOURCE_REPO: ${{ github.repository }}
           RELEASE_VERSION: ${{ steps.version.outputs.version }}
         run: |
-          if [ -z "$DISPATCH_TOKEN" ]; then
-            echo "::warning::LISTING_DISPATCH_TOKEN secret is not set; skipping VPM listing rebuild trigger."
-            exit 0
-          fi
           payload="$(jq -nc \
             --arg event "$DISPATCH_EVENT_TYPE" \
             --arg repo "$SOURCE_REPO" \
