@@ -109,9 +109,25 @@ namespace Yozolab.Tabstep
         /// <summary>Summons the shelf to the mouse and adds the current selection to it.</summary>
         internal static void SummonToMouse()
         {
+            // Captured before the summon: focusing the shelf window must not change
+            // what counts as the current selection.
+            var objects = SelectionForShelf();
             var window = SummonAt(GlobalMousePosition());
-            if (Selection.objects.Length > 0)
-                window.AddObjects(Selection.objects);
+            if (objects.Length > 0)
+                window.AddObjects(objects);
+        }
+
+        /// <summary>
+        /// What "the current selection" means for the shelf: normally the global
+        /// selection — but a Project browser's folder tree pane (the Assets/Packages
+        /// column) keeps its selection to itself, never touching the global Selection.
+        /// While that tree has keyboard focus, the folders selected there are what the
+        /// user is pointing at.
+        /// </summary>
+        internal static Object[] SelectionForShelf()
+        {
+            var treeFolders = ProjectBrowserHost.GetFolderTreeSelection();
+            return treeFolders.Length > 0 ? treeFolders : Selection.objects;
         }
 
         /// <summary>Opens the shelf at (or moves it to) a screen point, keeping its size.</summary>
