@@ -72,6 +72,21 @@ namespace Yozolab.Tabstep
 
         static readonly MethodInfo SetAsLastInteractedMethod = FindMethod("SetAsLastInteractedProjectBrowser", 0);
 
+        // internal static int[] GetTreeViewFolderSelection(bool forceUseTreeViewSelection)
+        // — what Unity's own delete/rename commands use to act on the folder tree pane.
+        static readonly MethodInfo GetTreeViewFolderSelectionMethod = BrowserType?
+            .GetMethods(BindingFlags.Static | BindingFlags.NonPublic | BindingFlags.Public)
+            .FirstOrDefault(m => m.Name == "GetTreeViewFolderSelection" && m.GetParameters().Length == 1);
+
+        // The asset list and its repaint hook (Action repaintCallback) — used to route
+        // the hosted browser's repaint requests to the host window.
+        static readonly FieldInfo ListAreaField =
+            BrowserType?.GetField("m_ListArea", BindingFlags.Instance | BindingFlags.NonPublic);
+
+        static readonly PropertyInfo ListAreaRepaintCallbackProperty =
+            ListAreaField?.FieldType.GetProperty("repaintCallback",
+                BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
+
         // internal void FrameObject(int instanceID, bool ping) — scrolls the asset
         // list/tree so the object is visible. Optional: missing just skips framing.
         static readonly MethodInfo FrameObjectMethod = FindMethod("FrameObject", 2);
@@ -101,6 +116,9 @@ namespace Yozolab.Tabstep
         readonly EditorWindow _owner;
         readonly HashSet<string> _warnedMethods = new HashSet<string>();
         EditorWindow _browser;
+        // Folder the browser showed when the owner last painted — detects the browser
+        // navigating itself (folder double-click, tree-pane click).
+        string _paintedFolder;
 
         public ProjectBrowserHost(EditorWindow owner)
         {
@@ -136,9 +154,41 @@ namespace Yozolab.Tabstep
             var size = _owner.position.size;
             PosField.SetValue(_browser, new Rect(0, 0, Mathf.Max(size.x, 200f), Mathf.Max(size.y, 100f)));
             Invoke(InitMethod);
+            HookListAreaRepaint();
             // Tabs target folders, which only the two-column mode can display directly.
             Invoke(SetTwoColumnsMethod);
             return true;
+        }
+
+        /// <summary>
+        /// Routes the asset list's repaint requests to the host window. They normally
+        /// flow into the browser's own Repaint(), but EditorWindow.Repaint only reaches
+        /// the parent view for that view's actualView — which the embedded browser never
+        /// is — so they all get dropped: thumbnails streaming in after a folder opens
+        /// would only show on the next incidental event (a mouse move). The list is
+        /// created once per browser instance, so hooking once here is enough.
+        /// </summary>
+        void HookListAreaRepaint()
+        {
+            if (ListAreaField == null || ListAreaRepaintCallbackProperty == null) return;
+            try
+            {
+                var listArea = ListAreaField.GetValue(_browser);
+                if (listArea == null) return;
+                var current = ListAreaRepaintCallbackProperty.GetValue(listArea) as Action;
+                ListAreaRepaintCallbackProperty.SetValue(listArea, current + (Action)RepaintOwner);
+            }
+            catch (Exception e)
+            {
+                // Cosmetic only — RepaintOwnerOnSelfNavigation still covers folder changes.
+                if (_warnedMethods.Add("repaintCallback"))
+                    Debug.LogWarning($"[Tabstep] Could not hook the list repaint: {e}");
+            }
+        }
+
+        void RepaintOwner()
+        {
+            if (_owner != null) _owner.Repaint();
         }
 
         /// <summary>
@@ -212,7 +262,23 @@ namespace Yozolab.Tabstep
             finally
             {
                 GUILayout.EndArea();
+                RepaintOwnerOnSelfNavigation();
             }
+        }
+
+        /// <summary>
+        /// Repaints the owner when the browser navigated itself during this pass. The
+        /// browser requests a repaint for that, but its EditorWindow.Repaint is a silent
+        /// no-op while hosted (see <see cref="HookListAreaRepaint"/>) — without this the
+        /// newly opened folder would only draw on the next incidental event. Runs in the
+        /// finally above because opening from the asset list ends in GUIUtility.ExitGUI.
+        /// </summary>
+        void RepaintOwnerOnSelfNavigation()
+        {
+            var folder = GetActiveFolderPath();
+            if (folder == _paintedFolder) return;
+            _paintedFolder = folder;
+            RepaintOwner();
         }
 
         /// <summary>
@@ -344,6 +410,34 @@ namespace Yozolab.Tabstep
             catch
             {
                 return Rect.zero;
+            }
+        }
+
+        /// <summary>
+        /// The folders selected in the folder tree pane (left column) of the last
+        /// interacted Project browser — stock or embedded. That tree keeps its
+        /// selection out of the global Selection, so features acting on "the selected
+        /// objects" would miss it otherwise. Non-empty only while the tree has keyboard
+        /// focus; the Packages root is a virtual item without an Object and is skipped.
+        /// </summary>
+        internal static Object[] GetFolderTreeSelection()
+        {
+            if (GetTreeViewFolderSelectionMethod == null) return Array.Empty<Object>();
+            try
+            {
+                var ids = GetTreeViewFolderSelectionMethod.Invoke(null, new object[] { false }) as int[];
+                if (ids == null || ids.Length == 0) return Array.Empty<Object>();
+                var objects = new List<Object>(ids.Length);
+                foreach (var id in ids)
+                {
+                    var obj = EditorUtility.InstanceIDToObject(id);
+                    if (obj != null) objects.Add(obj);
+                }
+                return objects.ToArray();
+            }
+            catch
+            {
+                return Array.Empty<Object>();
             }
         }
 

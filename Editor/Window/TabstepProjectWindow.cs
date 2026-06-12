@@ -1422,9 +1422,12 @@ namespace Yozolab.Tabstep
             else
                 menu.AddItem(new GUIContent("Add to Quick Access"), false,
                     () => TabstepBookmarks.Add(tab.CurrentPath));
-            if (Selection.objects.Length > 0)
+            // Captured now: includes the folder tree pane's selection, and the menu
+            // interaction itself must not change what gets sent.
+            var shelfSelection = TabstepShelfWindow.SelectionForShelf();
+            if (shelfSelection.Length > 0)
                 menu.AddItem(new GUIContent("Send Selection to Shelf"), false,
-                    () => TabstepShelfWindow.ShowNear(this).AddObjects(Selection.objects));
+                    () => TabstepShelfWindow.ShowNear(this).AddObjects(shelfSelection));
             else
                 menu.AddDisabledItem(new GUIContent("Send Selection to Shelf"));
             if (_lastMove.Count > 0)
