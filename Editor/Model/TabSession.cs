@@ -28,6 +28,20 @@ namespace Yozolab.Tabstep
             return Add(new TabState(folderPath), activate);
         }
 
+        /// <summary>
+        /// Index of the first tab currently showing <paramref name="folderPath"/>, or -1 if
+        /// none do. Lets a ping to an already-open folder switch to that tab instead of
+        /// opening a duplicate. Scoped to this window's tabs, so other windows don't interfere.
+        /// </summary>
+        public int IndexOfFolder(string folderPath)
+        {
+            folderPath = ProjectPaths.Normalize(folderPath);
+            if (folderPath == null) return -1;
+            for (int i = 0; i < Count; i++)
+                if (Tabs[i].CurrentPath == folderPath) return i;
+            return -1;
+        }
+
         /// <summary>Opens a tab right after the active one (never inside the pinned region).</summary>
         public TabState OpenTabAfterActive(string folderPath)
         {
