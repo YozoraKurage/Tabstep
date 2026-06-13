@@ -432,7 +432,15 @@ namespace Yozolab.Tabstep
             // Project"...). Open the destination as a new tab so the current tab keeps
             // its place, like Explorer; in-window navigation stays in the same tab.
             if (TabstepSettings.PingOpensNewTab && focusedWindow != this)
-                _session.OpenTab(browserPath);
+            {
+                // If this window already has a tab on the pinged folder, switch to it
+                // instead of opening a duplicate.
+                int existing = _session.IndexOfFolder(browserPath);
+                if (existing >= 0)
+                    ActivateTab(existing);
+                else
+                    _session.OpenTab(browserPath);
+            }
             else
                 tab.Navigate(browserPath);
         }
