@@ -160,9 +160,9 @@ namespace Yozolab.Tabstep
                     Repaint();
                 }
 
-                var dir = new GUIContent(tab.SortDescending ? "▼" : "▲",
-                    tab.SortDescending ? "Sorting descending — click for ascending"
-                                       : "Sorting ascending — click for descending");
+                var dir = new GUIContent(tab.SortDescending ? "↓" : "↑",
+                    tab.SortDescending ? "Sort: descending — click for ascending"
+                                       : "Sort: ascending — click for descending");
                 if (GUILayout.Button(dir, EditorStyles.toolbarButton, GUILayout.Width(24)))
                 {
                     tab.SortDescending = !tab.SortDescending;
@@ -173,9 +173,10 @@ namespace Yozolab.Tabstep
 
             using (new EditorGUI.DisabledScope(tab == null))
             {
-                bool now = GUILayout.Toggle(columns, new GUIContent("▦",
-                        "Group the folder's items into sortable type columns. " +
-                        "Toggle off for Unity's standard list."),
+                bool now = GUILayout.Toggle(columns, new GUIContent("☰",
+                        columns
+                            ? "Type-column view (items grouped by type) — click for Unity's standard list"
+                            : "Unity's standard list — click for the type-column view (items grouped by type)"),
                     EditorStyles.toolbarButton, GUILayout.Width(26));
                 if (tab != null && now != columns)
                 {
