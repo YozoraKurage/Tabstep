@@ -108,6 +108,22 @@ namespace Yozolab.Tabstep
                 prefix: typeof(ProjectBrowserPatcher).GetMethod(nameof(GetListHeaderHeightPrefix), Self));
             Apply(patch, harmony, harmonyMethodType, calculateRects,
                 postfix: typeof(ProjectBrowserPatcher).GetMethod(nameof(CalculateRectsPostfix), Self));
+
+            // Best-effort, ungated: record asset pings so the type-column view can flash the
+            // pinged item (the stock list draws that flash, but it hides behind the column
+            // view). A failure here must not sink the layout patches above.
+            try
+            {
+                var pingObject = typeof(EditorGUIUtility).GetMethod("PingObject",
+                    BindingFlags.Static | BindingFlags.Public, null, new[] { typeof(int) }, null);
+                var pingPostfix = typeof(ProjectBrowserPatcher).GetMethod(nameof(PingObjectPostfix), Self);
+                if (pingObject != null && pingPostfix != null)
+                    Apply(patch, harmony, harmonyMethodType, pingObject, postfix: pingPostfix);
+            }
+            catch (Exception e)
+            {
+                Debug.LogWarning($"[Tabstep] Could not hook PingObject for the column view flash: {e}");
+            }
             return true;
         }
 
@@ -132,6 +148,21 @@ namespace Yozolab.Tabstep
                 }
             }
             patch.Invoke(harmony, args);
+        }
+
+        // EditorGUIUtility.PingObject(Object) forwards to the int overload, so hooking this
+        // one catches every asset ping. Records it for the type-column view's flash.
+        static void PingObjectPostfix(int targetInstanceID)
+        {
+            try
+            {
+                PingTracker.Record(targetInstanceID);
+                // Kick the column-view windows so the flash starts even if nothing else
+                // repaints them this frame. Pings are user-initiated, so this is rare.
+                foreach (var window in Resources.FindObjectsOfTypeAll<TabstepProjectWindow>())
+                    window.Repaint();
+            }
+            catch { /* never let a ping throw */ }
         }
 
         // ---- patch callbacks (run for every ProjectBrowser; gate on IsCompact) ----

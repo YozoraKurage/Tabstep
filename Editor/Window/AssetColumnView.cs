@@ -26,6 +26,39 @@ namespace Yozolab.Tabstep
     }
 
     /// <summary>
+    /// Records the most recent asset ping (<see cref="EditorGUIUtility.PingObject(int)"/>) so
+    /// the type-column view can flash the pinged item itself — the stock list draws that flash,
+    /// but it sits hidden behind the column view. Fed by a Harmony postfix
+    /// (<see cref="ProjectBrowserPatcher"/>); without Harmony there is simply no flash.
+    /// </summary>
+    static class PingTracker
+    {
+        public const double Duration = 1.4; // ≈ Unity's ping lifetime
+
+        public static int InstanceID { get; private set; }
+        public static double StartTime { get; private set; } = -100;
+
+        public static void Record(int instanceID)
+        {
+            InstanceID = instanceID;
+            StartTime = EditorApplication.timeSinceStartup;
+        }
+
+        /// <summary>Asset path of an in-progress ping (with 0..1 progress), or null when none.</summary>
+        public static string Active(out float progress)
+        {
+            progress = 0f;
+            if (StartTime < 0) return null;
+            double age = EditorApplication.timeSinceStartup - StartTime;
+            if (age < 0 || age > Duration) return null;
+            var path = AssetDatabase.GetAssetPath(EditorUtility.InstanceIDToObject(InstanceID));
+            if (string.IsNullOrEmpty(path)) return null;
+            progress = (float)(age / Duration);
+            return path;
+        }
+    }
+
+    /// <summary>
     /// An opt-in replacement for the embedded browser's asset list (the right pane): the
     /// current folder's items grouped by type into vertical columns laid out left to right,
     /// with a horizontal scrollbar to move across the types. Self-rendered in IMGUI so it can
@@ -92,6 +125,12 @@ namespace Yozolab.Tabstep
         // "Column View Folder Drop" enabled hovers a folder). Cleared when the drag leaves.
         string _dropFolder;
 
+        // Ping flash replicating the stock list's: the pinged asset path and its fade alpha
+        // for the current Repaint, plus the ping we have already scrolled into view.
+        string _pingPath;
+        float _pingAlpha;
+        double _pingScrolled = -1;
+
         // The item a plain/Ctrl click last landed on; Shift+click selects the range from
         // here to the clicked item, in the visual reading order (down each column, then
         // across). Cleared when the shown folder changes.
@@ -121,6 +160,8 @@ namespace Yozolab.Tabstep
             EnsureBuilt(folder, key, descending);
             var e = Event.current;
             var lay = Measure(listRect);
+
+            HandlePing(lay, host);
 
             switch (e.type)
             {
@@ -288,6 +329,10 @@ namespace Yozolab.Tabstep
             EnsureBuilt(folder, key, descending);
             var lay = Measure(listRect);
 
+            var ping = PingTracker.Active(out float pingProgress);
+            _pingPath = ping;
+            _pingAlpha = ping != null ? PingAlpha(pingProgress) : 0f;
+
             EditorGUI.DrawRect(listRect, BgColor);
 
             if (_columns.Count == 0)
@@ -330,6 +375,7 @@ namespace Yozolab.Tabstep
         void DrawRow(Rect r, Item item, HashSet<string> selected)
         {
             bool isSelected = selected.Contains(item.Path);
+            bool isPing = _pingAlpha > 0.001f && item.Path == _pingPath;
             if (item.Path == _dropFolder)
             {
                 EditorGUI.DrawRect(r, DropColor);
@@ -338,12 +384,17 @@ namespace Yozolab.Tabstep
             else if (isSelected) EditorGUI.DrawRect(r, SelColor);
             else if (item.Path == _hoverPath) EditorGUI.DrawRect(r, HoverColor);
 
+            // Ping flash tint, under the icon/label so they stay readable.
+            if (isPing) EditorGUI.DrawRect(r, new Color(PingColor.r, PingColor.g, PingColor.b, _pingAlpha * 0.5f));
+
             var icon = AssetDatabase.GetCachedIcon(item.Path);
             var iconRect = new Rect(r.x + 4, r.y + (r.height - IconSize) / 2, IconSize, IconSize);
             if (icon != null) GUI.DrawTexture(iconRect, icon, ScaleMode.ScaleToFit);
 
             var labelRect = new Rect(iconRect.xMax + 4, r.y, r.xMax - iconRect.xMax - 6, r.height);
             GUI.Label(labelRect, item.Name, isSelected ? RowSelStyle : RowStyle);
+
+            if (isPing) DrawBorder(r, new Color(PingColor.r, PingColor.g, PingColor.b, _pingAlpha));
         }
 
         static HashSet<string> SelectedPaths()
@@ -409,6 +460,57 @@ namespace Yozolab.Tabstep
         {
             _scroll.x = Mathf.Clamp(_scroll.x, 0, lay.MaxX);
             _scroll.y = Mathf.Clamp(_scroll.y, 0, lay.MaxY);
+        }
+
+        // ---- ping flash ----------------------------------------------------------
+
+        /// <summary>
+        /// While an asset ping is alive, keep repainting (so the flash animates) and, once per
+        /// ping, scroll the pinged item into view — matching the stock list's behaviour.
+        /// </summary>
+        void HandlePing(Layout lay, Host host)
+        {
+            var path = PingTracker.Active(out _);
+            if (path == null) return;
+            host.Repaint?.Invoke();
+            if (PingTracker.StartTime != _pingScrolled && FindItem(path, out int ci, out int ii))
+            {
+                _pingScrolled = PingTracker.StartTime;
+                ScrollItemIntoView(ci, ii, lay);
+            }
+        }
+
+        bool FindItem(string path, out int ci, out int ii)
+        {
+            for (ci = 0; ci < _columns.Count; ci++)
+            {
+                var items = _columns[ci].Items;
+                for (ii = 0; ii < items.Count; ii++)
+                    if (items[ii].Path == path) return true;
+            }
+            ci = -1;
+            ii = -1;
+            return false;
+        }
+
+        void ScrollItemIntoView(int ci, int ii, Layout lay)
+        {
+            float itemX = Padding + ci * (ColumnWidth + ColumnGap);
+            float itemY = HeaderHeight + Padding + ii * RowHeight;
+            if (itemX < _scroll.x) _scroll.x = itemX;
+            else if (itemX + ColumnWidth > _scroll.x + lay.Viewport.width)
+                _scroll.x = itemX + ColumnWidth - lay.Viewport.width;
+            if (itemY < _scroll.y) _scroll.y = itemY;
+            else if (itemY + RowHeight > _scroll.y + lay.Viewport.height)
+                _scroll.y = itemY + RowHeight - lay.Viewport.height;
+            ClampScroll(lay);
+        }
+
+        static float PingAlpha(float progress)
+        {
+            float a = Mathf.Clamp01(1f - progress);          // fade out over the ping's life
+            a *= 0.6f + 0.4f * Mathf.Cos(progress * 6.2831853f * 1.5f); // a couple of pulses
+            return Mathf.Clamp01(a);
         }
 
         /// <summary>Resolves the path under <paramref name="mouse"/> (window coords), or null.</summary>
@@ -870,6 +972,7 @@ namespace Yozolab.Tabstep
         static Color ThumbColor => Pro ? new Color(0.45f, 0.45f, 0.45f) : new Color(0.52f, 0.52f, 0.52f);
         static Color DropColor => new Color(0.30f, 0.80f, 0.45f, 0.35f);
         static Color DropBorderColor => new Color(0.35f, 0.85f, 0.50f, 0.95f);
+        static Color PingColor => new Color(1f, 0.85f, 0.30f, 1f); // alpha applied per-frame by the flash
 
         /// <summary>Draws a 1px outline just inside <paramref name="r"/>.</summary>
         static void DrawBorder(Rect r, Color color)
