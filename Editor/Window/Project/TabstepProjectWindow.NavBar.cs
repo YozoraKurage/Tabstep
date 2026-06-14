@@ -186,29 +186,6 @@ namespace Yozolab.Tabstep
             }
         }
 
-        /// <summary>Whitespace-token containment, case-insensitive ("t:Prefab" in "boss t:Prefab").</summary>
-        internal static bool HasSearchToken(string text, string token)
-        {
-            if (string.IsNullOrEmpty(text)) return false;
-            foreach (var part in text.Split(' '))
-                if (part.Equals(token, StringComparison.OrdinalIgnoreCase))
-                    return true;
-            return false;
-        }
-
-        /// <summary>Adds the token to the search text, or removes it when already present.</summary>
-        internal static string ToggleSearchToken(string text, string token)
-        {
-            text ??= "";
-            if (!HasSearchToken(text, token))
-                return (text + " " + token).Trim();
-            var parts = new List<string>();
-            foreach (var part in text.Split(' '))
-                if (part.Length > 0 && !part.Equals(token, StringComparison.OrdinalIgnoreCase))
-                    parts.Add(part);
-            return string.Join(" ", parts);
-        }
-
         /// <summary>Right-clicking back/forward lists the whole history, newest first.</summary>
         void ShowHistoryMenu(Rect dropRect, TabState tab)
         {
