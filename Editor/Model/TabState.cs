@@ -18,11 +18,22 @@ namespace Yozolab.Tabstep
         [SerializeField] int _index = -1;
         [SerializeField] bool _pinned;
         [SerializeField] string _searchText = "";
+        [SerializeField] ItemViewMode _viewMode = ItemViewMode.Stock;
+        [SerializeField] AssetSortKey _sortKey = AssetSortKey.Name;
+        [SerializeField] bool _sortDescending;
+
+        /// <summary>
+        /// Picks the view mode a freshly created tab opens in (set by the window layer, which
+        /// knows whether the Harmony compact layout is available). Null — e.g. in tests or
+        /// before the editor has initialized — falls back to the stock list.
+        /// </summary>
+        internal static Func<ItemViewMode> DefaultViewModeProvider;
 
         public TabState() { }
 
         public TabState(string folderPath)
         {
+            _viewMode = DefaultViewModeProvider?.Invoke() ?? ItemViewMode.Stock;
             Navigate(folderPath);
         }
 
@@ -44,6 +55,27 @@ namespace Yozolab.Tabstep
         {
             get => _searchText;
             set => _searchText = value ?? "";
+        }
+
+        /// <summary>How this tab lays out the shown folder: Unity's list or the type-column view.</summary>
+        public ItemViewMode ViewMode
+        {
+            get => _viewMode;
+            set => _viewMode = value;
+        }
+
+        /// <summary>Sort key for the type-column view (Name / Type / Date modified / Size).</summary>
+        public AssetSortKey SortKey
+        {
+            get => _sortKey;
+            set => _sortKey = value;
+        }
+
+        /// <summary>Whether the type-column view sorts descending.</summary>
+        public bool SortDescending
+        {
+            get => _sortDescending;
+            set => _sortDescending = value;
         }
 
         /// <summary>
@@ -102,6 +134,9 @@ namespace Yozolab.Tabstep
                 _history = new List<string>(_history),
                 _index = _index,
                 _searchText = _searchText,
+                _viewMode = _viewMode,
+                _sortKey = _sortKey,
+                _sortDescending = _sortDescending,
             };
         }
     }
