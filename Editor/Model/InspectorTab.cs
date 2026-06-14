@@ -17,7 +17,7 @@ namespace Yozolab.Tabstep
     /// scene-object tabs live as long as their scene is open.
     /// </summary>
     [Serializable]
-    class InspectorTab
+    internal sealed class InspectorTab
     {
         [SerializeField] Object _target;
         [SerializeField] bool _followsSelection;

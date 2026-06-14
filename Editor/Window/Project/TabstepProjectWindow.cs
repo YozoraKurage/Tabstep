@@ -26,7 +26,7 @@ namespace Yozolab.Tabstep
     /// (Preferences) the bare W/S keys step the selection through the shown
     /// folder, D opens the selected folder/asset and A goes back.
     /// </summary>
-    public partial class TabstepProjectWindow : EditorWindow
+    internal sealed partial class TabstepProjectWindow : EditorWindow
     {
         const string PathFieldControl = "Tabstep.PathField";
 

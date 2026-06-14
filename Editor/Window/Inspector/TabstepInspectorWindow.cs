@@ -19,7 +19,7 @@ namespace Yozolab.Tabstep
     /// Shortcuts: Ctrl+T open selection as tab, Ctrl+W close tab,
     /// Ctrl(+Shift)+Tab cycle tabs.
     /// </summary>
-    public class TabstepInspectorWindow : EditorWindow
+    internal sealed class TabstepInspectorWindow : EditorWindow
     {
         // Tabs survive domain reloads and editor restarts via window serialization.
         [SerializeField] InspectorTabSession _session = new InspectorTabSession();

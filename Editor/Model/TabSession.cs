@@ -11,7 +11,7 @@ namespace Yozolab.Tabstep
     /// they can be reopened (Ctrl+Shift+T).
     /// </summary>
     [Serializable]
-    class TabSession : TabCollection<TabState>
+    internal sealed class TabSession : TabCollection<TabState>
     {
         // Oldest entries are dropped past this; keeps serialized window state bounded.
         internal const int MaxClosedTabs = 10;

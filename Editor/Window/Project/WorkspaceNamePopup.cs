@@ -4,7 +4,7 @@ using UnityEngine;
 namespace Yozolab.Tabstep
 {
     /// <summary>Tiny name prompt for "Save Tabs As..." — Unity has no built-in text dialog.</summary>
-    internal class WorkspaceNamePopup : PopupWindowContent
+    internal sealed class WorkspaceNamePopup : PopupWindowContent
     {
         internal TabstepProjectWindow _owner;
         string _name = "";

@@ -14,7 +14,7 @@ namespace Yozolab.Tabstep
     /// locked item is kept on the shelf for the rest of the editor session.
     /// </summary>
     [Serializable]
-    class ShelfItem
+    internal sealed class ShelfItem
     {
         /// <summary>Where the object lives — distinguished when the item is created.</summary>
         public enum SourceKind

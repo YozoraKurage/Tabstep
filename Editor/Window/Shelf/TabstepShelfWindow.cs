@@ -31,7 +31,7 @@ namespace Yozolab.Tabstep
     /// the editor session — locked items are stored in SessionState and restored even
     /// if the shelf window itself is closed and reopened.
     /// </summary>
-    class TabstepShelfWindow : EditorWindow
+    internal sealed class TabstepShelfWindow : EditorWindow
     {
         const string DragKey = "Tabstep.ShelfDrag";
         const string KeySeparator = "\n"; // joins item keys in the drag's generic data

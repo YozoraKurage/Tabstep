@@ -19,7 +19,7 @@ namespace Yozolab.Tabstep
     /// <see cref="IsAvailable"/> turns false and the window shows a fallback message
     /// instead of throwing.
     /// </summary>
-    class ProjectBrowserHost : IDisposable
+    internal sealed class ProjectBrowserHost : IDisposable
     {
         internal static readonly Type BrowserType =
             typeof(UnityEditor.Editor).Assembly.GetType("UnityEditor.ProjectBrowser");
