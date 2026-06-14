@@ -18,7 +18,7 @@ namespace Yozolab.Tabstep
     /// list and assets get their importer editors. Locking the tracker is internal
     /// API; when unavailable this degrades to a single Editor.CreateEditor view.
     /// </summary>
-    class InspectorTargetView : IDisposable
+    internal sealed class InspectorTargetView : IDisposable
     {
         // internal void ActiveEditorTracker.SetObjectsLockedByThisTracker(List<Object>)
         static readonly MethodInfo SetObjectsLockedMethod = typeof(ActiveEditorTracker)

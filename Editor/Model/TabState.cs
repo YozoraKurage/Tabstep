@@ -9,7 +9,7 @@ namespace Yozolab.Tabstep
     /// Pure data — serialized into the window so tabs survive domain reloads.
     /// </summary>
     [Serializable]
-    class TabState
+    internal sealed class TabState
     {
         // Oldest entries are dropped past this; keeps serialized window state bounded.
         internal const int MaxHistory = 100;

@@ -9,7 +9,7 @@ namespace Yozolab.Tabstep
 {
     /// <summary>Object tabs of an Tabstep Inspector window — see <see cref="TabCollection{TTab}"/>.</summary>
     [Serializable]
-    class InspectorTabSession : TabCollection<InspectorTab>
+    internal sealed class InspectorTabSession : TabCollection<InspectorTab>
     {
         public InspectorTab OpenTab(Object target, bool activate = true)
         {

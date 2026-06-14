@@ -7,7 +7,7 @@ namespace Yozolab.Tabstep
 {
     /// <summary>A bookmarked search: a filter pinned to the folder it was made in.</summary>
     [Serializable]
-    class SavedSearch
+    internal sealed class SavedSearch
     {
         public string folder;
         public string search;

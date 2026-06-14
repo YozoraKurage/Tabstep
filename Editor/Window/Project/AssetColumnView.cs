@@ -72,7 +72,7 @@ namespace Yozolab.Tabstep
     /// One instance per window (no shared mutable state) so multiple Tabstep windows that
     /// happen to be open at once never interfere with each other.
     /// </summary>
-    class AssetColumnView
+    internal sealed class AssetColumnView
     {
         /// <summary>Callbacks into the owning window — navigation and repaint.</summary>
         public struct Host
