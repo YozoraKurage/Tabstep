@@ -1,0 +1,883 @@
+using System;
+using System.Collections.Generic;
+using System.IO;
+using UnityEditor;
+using UnityEngine;
+using Object = UnityEngine.Object;
+
+namespace Yozolab.Tabstep
+{
+    /// <summary>How a tab lays out the items of the folder it shows.</summary>
+    enum ItemViewMode
+    {
+        /// <summary>Unity's own asset list (the embedded browser). Default.</summary>
+        Stock,
+        /// <summary>Items grouped by type into vertical columns laid out left to right.</summary>
+        TypeColumns,
+    }
+
+    /// <summary>Sort key for the type-column view, mirroring Windows Explorer's column sorts.</summary>
+    enum AssetSortKey
+    {
+        Name,
+        Type,
+        DateModified,
+        Size,
+    }
+
+    /// <summary>
+    /// An opt-in replacement for the embedded browser's asset list (the right pane): the
+    /// current folder's items grouped by type into vertical columns laid out left to right,
+    /// with a horizontal scrollbar to move across the types. Self-rendered in IMGUI so it can
+    /// offer sorting and a layout Unity's Project window does not.
+    ///
+    /// It is drawn over the browser's list area while the browser underneath keeps the folder
+    /// tree, search and selection sync working — only the list pane is covered. Each event is
+    /// consumed in a pass that runs before the browser paints (so the covered list never also
+    /// reacts) and the pixels are drawn in a pass that runs after it (so they land on top).
+    ///
+    /// One instance per window (no shared mutable state) so multiple Tabstep windows that
+    /// happen to be open at once never interfere with each other.
+    /// </summary>
+    class AssetColumnView
+    {
+        /// <summary>Callbacks into the owning window — navigation and repaint.</summary>
+        public struct Host
+        {
+            public Action<string> OpenFolder;          // double-click a folder column entry
+            public Action<string> OpenFolderInNewTab;  // middle-click a folder column entry
+            public Action Repaint;
+            public Action MarkBrowserInteracted;        // so the Assets/Create menu targets our folder
+        }
+
+        // ---- layout constants ----
+        const float ColumnWidth = 190f;
+        const float ColumnGap = 6f;
+        const float HeaderHeight = 22f;
+        const float RowHeight = 20f;
+        const float IconSize = 16f;
+        const float Padding = 6f;
+        const float ScrollbarThickness = 13f;
+        const float DragThreshold = 6f;
+        const float MinThumb = 24f;
+
+        // Bumped after any project change so every view rebuilds its cache lazily.
+        public static int ProjectVersion;
+
+        Vector2 _scroll;
+
+        // Cache of the grouped/sorted columns; rebuilt only when an input below changes.
+        string _builtFolder;
+        AssetSortKey _builtKey;
+        bool _builtDescending;
+        int _builtVersion = -1;
+        readonly List<Column> _columns = new List<Column>();
+
+        // Press / potential-drag state for the list.
+        string _pressedPath;
+        Vector2 _pressPos;
+        bool _maybeDragging;
+        // A plain (no-modifier) press defers its selection to release, so that grabbing an
+        // item to drag it does not switch the Inspector — only a click that never becomes a
+        // drag selects, on mouse up.
+        bool _clickSelectPending;
+
+        // Scrollbar thumb drag: 0 none, 1 horizontal, 2 vertical.
+        int _thumbDrag;
+        float _thumbGrabOffset;
+
+        string _hoverPath;
+
+        // The folder column currently highlighted as a drop target (only while a drag with
+        // "Column View Folder Drop" enabled hovers a folder). Cleared when the drag leaves.
+        string _dropFolder;
+
+        // The item a plain/Ctrl click last landed on; Shift+click selects the range from
+        // here to the clicked item, in the visual reading order (down each column, then
+        // across). Cleared when the shown folder changes.
+        string _selectionAnchor;
+
+        class Column
+        {
+            public string Label;
+            public readonly List<Item> Items = new List<Item>();
+        }
+
+        struct Item
+        {
+            public string Path;
+            public string Name;
+            public long Size;
+            public long DateTicks;
+        }
+
+        /// <summary>Forces a rebuild on the next pass (view toggled, sort changed, project changed).</summary>
+        public void MarkDirty() => _builtFolder = null;
+
+        // ---- event pass (runs BEFORE the embedded browser paints) ----------------
+
+        public void HandleEvents(Rect listRect, string folder, AssetSortKey key, bool descending, Host host)
+        {
+            EnsureBuilt(folder, key, descending);
+            var e = Event.current;
+            var lay = Measure(listRect);
+
+            switch (e.type)
+            {
+                case EventType.ScrollWheel:
+                    if (listRect.Contains(e.mousePosition))
+                    {
+                        // Vertical wheel scrolls down the columns; with Shift (or when there is
+                        // nothing to scroll vertically) it walks across the type columns instead.
+                        if (e.shift || !lay.NeedV) _scroll.x += e.delta.y * RowHeight;
+                        else _scroll.y += e.delta.y * RowHeight;
+                        ClampScroll(lay);
+                        host.Repaint?.Invoke();
+                        e.Use();
+                    }
+                    break;
+
+                case EventType.MouseMove:
+                    var hover = lay.Viewport.Contains(e.mousePosition)
+                        ? HitTest(e.mousePosition, lay, out _) : null;
+                    if (hover != _hoverPath) { _hoverPath = hover; host.Repaint?.Invoke(); }
+                    break;
+
+                case EventType.MouseDown:
+                    if (lay.NeedH && lay.HBar.Contains(e.mousePosition)) { BeginThumbDrag(lay, true, e); e.Use(); break; }
+                    if (lay.NeedV && lay.VBar.Contains(e.mousePosition)) { BeginThumbDrag(lay, false, e); e.Use(); break; }
+                    if (!lay.Viewport.Contains(e.mousePosition)) break;
+                    HandleListMouseDown(e, lay, host);
+                    break;
+
+                case EventType.MouseDrag:
+                    if (_thumbDrag != 0) { DragThumb(lay, e); host.Repaint?.Invoke(); e.Use(); }
+                    else if (_maybeDragging && _pressedPath != null)
+                    {
+                        if ((e.mousePosition - _pressPos).magnitude > DragThreshold)
+                        {
+                            StartAssetDrag(_pressedPath);
+                            _maybeDragging = false;
+                            _pressedPath = null;
+                            _clickSelectPending = false; // a drag, not a click — keep the selection
+                        }
+                        // Consume even below the threshold so the covered browser stays inert.
+                        e.Use();
+                    }
+                    break;
+
+                case EventType.DragUpdated:
+                case EventType.DragPerform:
+                    // The list pane is covered by this view, but the browser underneath would
+                    // still react to a drag passing over it — selecting/pinging whatever sits
+                    // at that spot in its own (hidden, differently ordered) layout, which
+                    // switches the Inspector to the wrong object. Swallow the drag here so only
+                    // real drop targets elsewhere (scene, object fields, the folder tree) act.
+                    //
+                    // Opt-in: dropping onto a folder entry moves the dragged assets into it.
+                    if (listRect.Contains(e.mousePosition))
+                    {
+                        var dropFolder = TabstepSettings.ColumnViewFolderDrop
+                            ? FolderDropTarget(e.mousePosition, lay) : null;
+                        if (dropFolder != null)
+                        {
+                            DragAndDrop.visualMode = DragAndDropVisualMode.Move;
+                            if (e.type == EventType.DragPerform)
+                            {
+                                DragAndDrop.AcceptDrag();
+                                MoveAssetsInto(dropFolder);
+                                _dropFolder = null;
+                            }
+                            else
+                            {
+                                _dropFolder = dropFolder; // highlight it while hovering
+                            }
+                        }
+                        else
+                        {
+                            DragAndDrop.visualMode = DragAndDropVisualMode.None;
+                            _dropFolder = null;
+                        }
+                        host.Repaint?.Invoke();
+                        e.Use();
+                    }
+                    break;
+
+                case EventType.DragExited:
+                    _dropFolder = null;
+                    break;
+
+                case EventType.MouseUp:
+                    if (_thumbDrag != 0) { _thumbDrag = 0; e.Use(); }
+                    else if (_clickSelectPending)
+                    {
+                        // A plain click that never became a drag: select now (this is the
+                        // point the Inspector is allowed to switch).
+                        Selection.activeObject = _pressedPath != null
+                            ? AssetDatabase.LoadMainAssetAtPath(_pressedPath)
+                            : null;
+                        if (_pressedPath != null) _selectionAnchor = _pressedPath;
+                        host.Repaint?.Invoke();
+                        e.Use();
+                    }
+                    _clickSelectPending = false;
+                    _maybeDragging = false;
+                    _pressedPath = null;
+                    break;
+            }
+        }
+
+        void HandleListMouseDown(Event e, Layout lay, Host host)
+        {
+            var path = HitTest(e.mousePosition, lay, out bool isFolder);
+
+            if (e.button == 0)
+            {
+                if (e.clickCount == 2)
+                {
+                    _maybeDragging = false;
+                    _pressedPath = null;
+                    _clickSelectPending = false;
+                    if (path != null) OpenItem(path, isFolder, host);
+                }
+                else if (e.shift || e.control || e.command)
+                {
+                    // A deliberate range/toggle selection — apply it on press.
+                    if (path != null) ApplyClickSelection(path, e);
+                    _pressedPath = path;
+                    _pressPos = e.mousePosition;
+                    _maybeDragging = path != null;
+                    _clickSelectPending = false;
+                }
+                else
+                {
+                    // Plain press: defer the selection to release. Grabbing an item to drag
+                    // it must not switch the Inspector — only a click that does not turn into
+                    // a drag selects, handled on mouse up.
+                    _pressedPath = path;
+                    _pressPos = e.mousePosition;
+                    _maybeDragging = path != null;
+                    _clickSelectPending = true;
+                }
+                host.Repaint?.Invoke();
+                e.Use();
+            }
+            else if (e.button == 1)
+            {
+                if (path != null && !IsSelected(path))
+                {
+                    Selection.activeObject = AssetDatabase.LoadMainAssetAtPath(path);
+                    _selectionAnchor = path;
+                }
+                host.MarkBrowserInteracted?.Invoke();
+                EditorUtility.DisplayPopupMenu(new Rect(e.mousePosition.x, e.mousePosition.y, 0, 0), "Assets/", null);
+                e.Use();
+            }
+            else if (e.button == 2)
+            {
+                if (path != null && isFolder) host.OpenFolderInNewTab?.Invoke(path);
+                e.Use();
+            }
+        }
+
+        // ---- draw pass (runs AFTER the embedded browser paints) ------------------
+
+        public void Draw(Rect listRect, string folder, AssetSortKey key, bool descending)
+        {
+            if (Event.current.type != EventType.Repaint) return;
+            EnsureBuilt(folder, key, descending);
+            var lay = Measure(listRect);
+
+            EditorGUI.DrawRect(listRect, BgColor);
+
+            if (_columns.Count == 0)
+            {
+                GUI.Label(listRect, "This folder is empty.", EmptyStyle);
+                return;
+            }
+
+            var selected = SelectedPaths();
+            var offset = new Vector2(-_scroll.x, -_scroll.y);
+            GUI.BeginClip(lay.Viewport);
+            for (int ci = 0; ci < _columns.Count; ci++)
+            {
+                var col = _columns[ci];
+                float colX = Padding + ci * (ColumnWidth + ColumnGap) + offset.x;
+                if (colX > lay.Viewport.width || colX + ColumnWidth < 0) continue; // off-screen column
+
+                DrawHeader(new Rect(colX, offset.y, ColumnWidth, HeaderHeight), col);
+                for (int ii = 0; ii < col.Items.Count; ii++)
+                {
+                    float y = HeaderHeight + Padding + ii * RowHeight + offset.y;
+                    if (y >= lay.Viewport.height || y + RowHeight <= 0) continue; // off-screen row
+                    DrawRow(new Rect(colX, y, ColumnWidth, RowHeight), col.Items[ii], selected);
+                }
+            }
+            GUI.EndClip();
+
+            if (lay.NeedH) DrawScrollbar(lay, true);
+            if (lay.NeedV) DrawScrollbar(lay, false);
+        }
+
+        void DrawHeader(Rect r, Column col)
+        {
+            EditorGUI.DrawRect(r, HeaderColor);
+            EditorGUI.DrawRect(new Rect(r.x, r.yMax - 1, r.width, 1), DividerColor);
+            GUI.Label(new Rect(r.x + 5, r.y, r.width - 8, r.height),
+                $"{col.Label}  ({col.Items.Count})", HeaderStyle);
+        }
+
+        void DrawRow(Rect r, Item item, HashSet<string> selected)
+        {
+            bool isSelected = selected.Contains(item.Path);
+            if (item.Path == _dropFolder)
+            {
+                EditorGUI.DrawRect(r, DropColor);
+                DrawBorder(r, DropBorderColor);
+            }
+            else if (isSelected) EditorGUI.DrawRect(r, SelColor);
+            else if (item.Path == _hoverPath) EditorGUI.DrawRect(r, HoverColor);
+
+            var icon = AssetDatabase.GetCachedIcon(item.Path);
+            var iconRect = new Rect(r.x + 4, r.y + (r.height - IconSize) / 2, IconSize, IconSize);
+            if (icon != null) GUI.DrawTexture(iconRect, icon, ScaleMode.ScaleToFit);
+
+            var labelRect = new Rect(iconRect.xMax + 4, r.y, r.xMax - iconRect.xMax - 6, r.height);
+            GUI.Label(labelRect, item.Name, isSelected ? RowSelStyle : RowStyle);
+        }
+
+        static HashSet<string> SelectedPaths()
+        {
+            var set = new HashSet<string>();
+            foreach (var o in Selection.objects)
+            {
+                var p = AssetDatabase.GetAssetPath(o);
+                if (!string.IsNullOrEmpty(p)) set.Add(p);
+            }
+            return set;
+        }
+
+        void DrawScrollbar(Layout lay, bool horizontal)
+        {
+            var (track, thumb) = ThumbRects(lay, horizontal);
+            EditorGUI.DrawRect(track, TrackColor);
+            EditorGUI.DrawRect(thumb, ThumbColor);
+        }
+
+        // ---- geometry ------------------------------------------------------------
+
+        struct Layout
+        {
+            public Rect Viewport;       // area the columns are clipped to (excludes scrollbars)
+            public bool NeedH, NeedV;
+            public Rect HBar, VBar;     // scrollbar track rects, in window coordinates
+            public float ContentW, ContentH;
+            public float MaxX, MaxY;
+        }
+
+        Layout Measure(Rect listRect)
+        {
+            float contentW = _columns.Count * (ColumnWidth + ColumnGap) + Padding;
+            int maxRows = 0;
+            foreach (var c in _columns) maxRows = Mathf.Max(maxRows, c.Items.Count);
+            float contentH = HeaderHeight + Padding + maxRows * RowHeight + Padding;
+
+            bool needH = contentW > listRect.width;
+            bool needV = contentH > listRect.height - (needH ? ScrollbarThickness : 0);
+            if (needV) needH = contentW > listRect.width - ScrollbarThickness;
+
+            float viewW = listRect.width - (needV ? ScrollbarThickness : 0);
+            float viewH = listRect.height - (needH ? ScrollbarThickness : 0);
+
+            var lay = new Layout
+            {
+                NeedH = needH,
+                NeedV = needV,
+                ContentW = contentW,
+                ContentH = contentH,
+                Viewport = new Rect(listRect.x, listRect.y, viewW, viewH),
+                MaxX = Mathf.Max(0, contentW - viewW),
+                MaxY = Mathf.Max(0, contentH - viewH),
+                HBar = new Rect(listRect.x, listRect.yMax - ScrollbarThickness, viewW, ScrollbarThickness),
+                VBar = new Rect(listRect.xMax - ScrollbarThickness, listRect.y, ScrollbarThickness, viewH),
+            };
+            ClampScroll(lay);
+            return lay;
+        }
+
+        void ClampScroll(Layout lay)
+        {
+            _scroll.x = Mathf.Clamp(_scroll.x, 0, lay.MaxX);
+            _scroll.y = Mathf.Clamp(_scroll.y, 0, lay.MaxY);
+        }
+
+        /// <summary>Resolves the path under <paramref name="mouse"/> (window coords), or null.</summary>
+        string HitTest(Vector2 mouse, Layout lay, out bool isFolder)
+        {
+            isFolder = false;
+            var content = (mouse - lay.Viewport.position) + _scroll;
+            if (content.x < Padding || content.y < HeaderHeight + Padding) return null;
+
+            float stride = ColumnWidth + ColumnGap;
+            int ci = Mathf.FloorToInt((content.x - Padding) / stride);
+            if (ci < 0 || ci >= _columns.Count) return null;
+            if ((content.x - Padding) - ci * stride > ColumnWidth) return null; // in the gap between columns
+
+            int ii = Mathf.FloorToInt((content.y - HeaderHeight - Padding) / RowHeight);
+            var col = _columns[ci];
+            if (ii < 0 || ii >= col.Items.Count) return null;
+
+            var path = col.Items[ii].Path;
+            isFolder = AssetDatabase.IsValidFolder(path);
+            return path;
+        }
+
+        (Rect track, Rect thumb) ThumbRects(Layout lay, bool horizontal)
+        {
+            Rect track = horizontal ? lay.HBar : lay.VBar;
+            float content = horizontal ? lay.ContentW : lay.ContentH;
+            float view = horizontal ? lay.Viewport.width : lay.Viewport.height;
+            float trackLen = horizontal ? track.width : track.height;
+            float frac = content > 0 ? Mathf.Clamp01(view / content) : 1f;
+            float thumbLen = Mathf.Max(MinThumb, trackLen * frac);
+            float maxScroll = horizontal ? lay.MaxX : lay.MaxY;
+            float t = maxScroll > 0 ? (horizontal ? _scroll.x : _scroll.y) / maxScroll : 0f;
+            float travel = trackLen - thumbLen;
+            Rect thumb = horizontal
+                ? new Rect(track.x + t * travel, track.y + 2, thumbLen, track.height - 4)
+                : new Rect(track.x + 2, track.y + t * travel, track.width - 4, thumbLen);
+            return (track, thumb);
+        }
+
+        void BeginThumbDrag(Layout lay, bool horizontal, Event e)
+        {
+            _thumbDrag = horizontal ? 1 : 2;
+            var (_, thumb) = ThumbRects(lay, horizontal);
+            float along = horizontal ? e.mousePosition.x : e.mousePosition.y;
+            float thumbStart = horizontal ? thumb.x : thumb.y;
+            float thumbEnd = horizontal ? thumb.xMax : thumb.yMax;
+            if (along < thumbStart || along > thumbEnd)
+            {
+                // Clicked the track outside the thumb — jump so the thumb centres on the cursor.
+                _thumbGrabOffset = (horizontal ? thumb.width : thumb.height) / 2f;
+                DragThumbTo(lay, horizontal, along);
+            }
+            else
+            {
+                _thumbGrabOffset = along - thumbStart;
+            }
+        }
+
+        void DragThumb(Layout lay, Event e)
+        {
+            bool horizontal = _thumbDrag == 1;
+            DragThumbTo(lay, horizontal, horizontal ? e.mousePosition.x : e.mousePosition.y);
+        }
+
+        void DragThumbTo(Layout lay, bool horizontal, float along)
+        {
+            var (track, thumb) = ThumbRects(lay, horizontal);
+            float trackStart = horizontal ? track.x : track.y;
+            float trackLen = horizontal ? track.width : track.height;
+            float thumbLen = horizontal ? thumb.width : thumb.height;
+            float travel = trackLen - thumbLen;
+            float t = travel > 0 ? Mathf.Clamp01((along - _thumbGrabOffset - trackStart) / travel) : 0f;
+            if (horizontal) _scroll.x = t * lay.MaxX;
+            else _scroll.y = t * lay.MaxY;
+        }
+
+        // ---- selection / open / drag ---------------------------------------------
+
+        static bool IsSelected(string path)
+        {
+            foreach (var o in Selection.objects)
+                if (AssetDatabase.GetAssetPath(o) == path) return true;
+            return false;
+        }
+
+        void ApplyClickSelection(string path, Event e)
+        {
+            var obj = AssetDatabase.LoadMainAssetAtPath(path);
+            if (obj == null) return;
+            bool additive = e.control || e.command;
+
+            // Shift extends a range from the anchor; the anchor itself stays put so the
+            // range can be re-stretched, exactly like Explorer and Unity's own list.
+            if (e.shift)
+            {
+                SelectRange(path, additive);
+                return;
+            }
+
+            if (additive)
+            {
+                var list = new List<Object>(Selection.objects);
+                int idx = list.IndexOf(obj);
+                if (idx >= 0) list.RemoveAt(idx);
+                else list.Add(obj);
+                Selection.objects = list.ToArray();
+            }
+            else
+            {
+                Selection.activeObject = obj;
+            }
+            _selectionAnchor = path;
+        }
+
+        /// <summary>
+        /// Selects every item between the anchor and <paramref name="targetPath"/> in the
+        /// visual reading order (down each column, then across to the next). With
+        /// <paramref name="additive"/> (Shift+Ctrl) the range is added to the current
+        /// selection instead of replacing it.
+        /// </summary>
+        void SelectRange(string targetPath, bool additive)
+        {
+            var order = FlattenedPaths();
+            int ti = order.IndexOf(targetPath);
+            if (ti < 0) return;
+
+            string anchor = _selectionAnchor;
+            if (anchor == null)
+            {
+                var active = AssetDatabase.GetAssetPath(Selection.activeObject);
+                if (!string.IsNullOrEmpty(active) && order.Contains(active)) anchor = active;
+            }
+            int ai = anchor != null ? order.IndexOf(anchor) : -1;
+            if (ai < 0) { ai = ti; _selectionAnchor = targetPath; }
+
+            int lo = Mathf.Min(ai, ti), hi = Mathf.Max(ai, ti);
+            var objs = new List<Object>();
+            if (additive)
+                objs.AddRange(Selection.objects);
+            for (int i = lo; i <= hi; i++)
+            {
+                var o = AssetDatabase.LoadMainAssetAtPath(order[i]);
+                if (o != null && !objs.Contains(o)) objs.Add(o);
+            }
+            Selection.objects = objs.ToArray();
+        }
+
+        /// <summary>Every item path in the visual reading order: down each column, then across.</summary>
+        List<string> FlattenedPaths()
+        {
+            var paths = new List<string>();
+            foreach (var col in _columns)
+                foreach (var item in col.Items)
+                    paths.Add(item.Path);
+            return paths;
+        }
+
+        static void OpenItem(string path, bool isFolder, Host host)
+        {
+            if (isFolder) { host.OpenFolder?.Invoke(path); return; }
+            var obj = AssetDatabase.LoadMainAssetAtPath(path);
+            if (obj != null) AssetDatabase.OpenAsset(obj);
+        }
+
+        static void StartAssetDrag(string path)
+        {
+            var paths = new List<string>();
+            var objs = new List<Object>();
+            if (IsSelected(path))
+            {
+                foreach (var o in Selection.objects)
+                {
+                    var p = AssetDatabase.GetAssetPath(o);
+                    if (!string.IsNullOrEmpty(p)) { paths.Add(p); objs.Add(o); }
+                }
+            }
+            if (objs.Count == 0)
+            {
+                var obj = AssetDatabase.LoadMainAssetAtPath(path);
+                if (obj != null) { paths.Add(path); objs.Add(obj); }
+            }
+            if (objs.Count == 0) return;
+            DragAndDrop.PrepareStartDrag();
+            DragAndDrop.objectReferences = objs.ToArray();
+            DragAndDrop.paths = paths.ToArray();
+            DragAndDrop.StartDrag(objs.Count == 1 ? objs[0].name : objs.Count + " Assets");
+        }
+
+        /// <summary>
+        /// The folder under <paramref name="mouse"/> that the current drag could move into,
+        /// or null when the cursor isn't over a folder or nothing movable is being dragged.
+        /// </summary>
+        string FolderDropTarget(Vector2 mouse, Layout lay)
+        {
+            var path = HitTest(mouse, lay, out bool isFolder);
+            if (!isFolder || path == null) return null;
+            var paths = DragAndDrop.paths;
+            if (paths == null || paths.Length == 0) return null;
+            // At least one dragged asset must not already live in the target folder.
+            foreach (var p in paths)
+                if (!string.IsNullOrEmpty(p) && ParentFolder(p) != path && p != path)
+                    return path;
+            return null;
+        }
+
+        /// <summary>Moves the dragged assets into <paramref name="folder"/>, skipping no-ops.</summary>
+        static void MoveAssetsInto(string folder)
+        {
+            var paths = DragAndDrop.paths;
+            if (paths == null || paths.Length == 0) return;
+            AssetDatabase.StartAssetEditing();
+            try
+            {
+                foreach (var p in paths)
+                {
+                    if (string.IsNullOrEmpty(p) || ParentFolder(p) == folder) continue;
+                    // Never move a folder into itself or one of its own descendants.
+                    if (AssetDatabase.IsValidFolder(p) &&
+                        (folder == p || folder.StartsWith(p + "/", StringComparison.Ordinal)))
+                        continue;
+                    var dest = AssetDatabase.GenerateUniqueAssetPath(folder + "/" + Path.GetFileName(p));
+                    AssetDatabase.MoveAsset(p, dest);
+                }
+            }
+            finally
+            {
+                AssetDatabase.StopAssetEditing();
+                AssetDatabase.Refresh();
+            }
+        }
+
+        static string ParentFolder(string path)
+        {
+            int slash = path.LastIndexOf('/');
+            return slash <= 0 ? "" : path.Substring(0, slash);
+        }
+
+        // ---- building the columns ------------------------------------------------
+
+        void EnsureBuilt(string folder, AssetSortKey key, bool descending)
+        {
+            if (folder == _builtFolder && key == _builtKey && descending == _builtDescending &&
+                _builtVersion == ProjectVersion)
+                return;
+
+            // Reset the scroll and range anchor when the shown folder changes.
+            if (folder != _builtFolder)
+            {
+                _scroll = Vector2.zero;
+                _selectionAnchor = null;
+            }
+
+            _builtFolder = folder;
+            _builtKey = key;
+            _builtDescending = descending;
+            _builtVersion = ProjectVersion;
+            _columns.Clear();
+            if (string.IsNullOrEmpty(folder)) return;
+
+            var byLabel = new Dictionary<string, Column>();
+            foreach (var path in EnumerateChildren(folder))
+            {
+                bool isFolder = AssetDatabase.IsValidFolder(path);
+                string label = isFolder ? "Folders" : TypeLabel(path);
+                if (!byLabel.TryGetValue(label, out var col))
+                {
+                    col = new Column { Label = label };
+                    byLabel[label] = col;
+                    _columns.Add(col);
+                }
+                var item = new Item { Path = path, Name = Path.GetFileNameWithoutExtension(path) };
+                FillMeta(ref item, path, isFolder);
+                col.Items.Add(item);
+            }
+
+            // Folders column always first; the rest by type name (reversed when sorting by
+            // Type descending). The chosen key then orders the items inside each column.
+            _columns.Sort((a, b) =>
+            {
+                bool af = a.Label == "Folders", bf = b.Label == "Folders";
+                if (af != bf) return af ? -1 : 1;
+                int c = string.Compare(a.Label, b.Label, StringComparison.OrdinalIgnoreCase);
+                return key == AssetSortKey.Type && descending ? -c : c;
+            });
+            foreach (var col in _columns)
+                col.Items.Sort((a, b) => CompareItems(a, b, key, descending));
+        }
+
+        static int CompareItems(Item a, Item b, AssetSortKey key, bool descending)
+        {
+            int c;
+            switch (key)
+            {
+                case AssetSortKey.DateModified: c = a.DateTicks.CompareTo(b.DateTicks); break;
+                case AssetSortKey.Size: c = a.Size.CompareTo(b.Size); break;
+                default: c = 0; break; // Name and Type fall back to the natural name order
+            }
+            if (c == 0) c = NaturalCompare(a.Name, b.Name);
+            // Type only reorders the columns, never the (same-type) items inside them.
+            bool reverse = descending && key != AssetSortKey.Type;
+            return reverse ? -c : c;
+        }
+
+        /// <summary>
+        /// Explorer-style name ordering: case-insensitive, with runs of digits compared
+        /// numerically so "item2" sorts before "item10".
+        /// </summary>
+        static int NaturalCompare(string a, string b)
+        {
+            if (a == null) return b == null ? 0 : -1;
+            if (b == null) return 1;
+            int ia = 0, ib = 0;
+            while (ia < a.Length && ib < b.Length)
+            {
+                char ca = a[ia], cb = b[ib];
+                if (char.IsDigit(ca) && char.IsDigit(cb))
+                {
+                    int sa = ia, sb = ib;
+                    while (ia < a.Length && char.IsDigit(a[ia])) ia++;
+                    while (ib < b.Length && char.IsDigit(b[ib])) ib++;
+                    string na = a.Substring(sa, ia - sa).TrimStart('0');
+                    string nb = b.Substring(sb, ib - sb).TrimStart('0');
+                    if (na.Length != nb.Length) return na.Length - nb.Length; // more digits = larger number
+                    int cmp = string.CompareOrdinal(na, nb);
+                    if (cmp != 0) return cmp;
+                }
+                else
+                {
+                    int cmp = char.ToLowerInvariant(ca).CompareTo(char.ToLowerInvariant(cb));
+                    if (cmp != 0) return cmp;
+                    ia++;
+                    ib++;
+                }
+            }
+            return (a.Length - ia) - (b.Length - ib); // shorter remaining string sorts first
+        }
+
+        static string TypeLabel(string path)
+        {
+            var t = AssetDatabase.GetMainAssetTypeAtPath(path);
+            if (t == null)
+            {
+                var ext = Path.GetExtension(path);
+                return string.IsNullOrEmpty(ext) ? "Other" : ext.TrimStart('.').ToUpperInvariant();
+            }
+            switch (t.Name)
+            {
+                case "GameObject": return "Prefab";
+                case "SceneAsset": return "Scene";
+                case "MonoScript": return "Script";
+                case "TextAsset": return "Text";
+                case "Texture2D": return "Texture";
+                case "AudioClip": return "Audio";
+                case "DefaultAsset": return "Other";
+                default: return ObjectNames.NicifyVariableName(t.Name);
+            }
+        }
+
+        static IEnumerable<string> EnumerateChildren(string folder)
+        {
+            foreach (var sub in AssetDatabase.GetSubFolders(folder))
+                yield return sub;
+
+            string abs = AbsolutePath(folder);
+            if (abs != null && Directory.Exists(abs))
+            {
+                foreach (var file in Directory.EnumerateFiles(abs))
+                {
+                    if (file.EndsWith(".meta", StringComparison.OrdinalIgnoreCase)) continue;
+                    string name = Path.GetFileName(file);
+                    if (name.StartsWith(".")) continue; // hidden files are not assets
+                    string rel = folder + "/" + name;
+                    if (AssetDatabase.GetMainAssetTypeAtPath(rel) == null &&
+                        AssetDatabase.LoadAssetAtPath<Object>(rel) == null)
+                        continue; // skip files the asset database does not track
+                    yield return rel;
+                }
+            }
+            else
+            {
+                // Packages / virtual roots that are not directly on disk: use the asset index.
+                foreach (var guid in AssetDatabase.FindAssets(string.Empty, new[] { folder }))
+                {
+                    string p = AssetDatabase.GUIDToAssetPath(guid);
+                    if (string.IsNullOrEmpty(p) || AssetDatabase.IsValidFolder(p)) continue;
+                    int slash = p.LastIndexOf('/');
+                    if (slash <= 0 || p.Substring(0, slash) != folder) continue; // immediate children only
+                    yield return p;
+                }
+            }
+        }
+
+        static void FillMeta(ref Item item, string path, bool isFolder)
+        {
+            string abs = AbsolutePath(path);
+            try
+            {
+                if (!isFolder && abs != null && File.Exists(abs))
+                {
+                    var fi = new FileInfo(abs);
+                    item.Size = fi.Length;
+                    item.DateTicks = fi.LastWriteTimeUtc.Ticks;
+                }
+                else if (abs != null && Directory.Exists(abs))
+                {
+                    item.DateTicks = Directory.GetLastWriteTimeUtc(abs).Ticks;
+                }
+            }
+            catch
+            {
+                // Date/size are best-effort; a missing file just sorts as zero.
+            }
+        }
+
+        static string AbsolutePath(string projectPath)
+        {
+            if (projectPath == "Assets") return Application.dataPath;
+            if (projectPath.StartsWith("Assets/", StringComparison.Ordinal))
+                return Application.dataPath + projectPath.Substring("Assets".Length);
+            try { return Path.GetFullPath(projectPath); }
+            catch { return null; }
+        }
+
+        // ---- styles & colours ----------------------------------------------------
+
+        static GUIStyle _rowStyle, _rowSelStyle, _headerStyle, _emptyStyle;
+
+        static GUIStyle RowStyle => _rowStyle ??= new GUIStyle(EditorStyles.label)
+        {
+            alignment = TextAnchor.MiddleLeft,
+            clipping = TextClipping.Clip,
+            padding = new RectOffset(0, 2, 0, 0),
+        };
+
+        static GUIStyle RowSelStyle => _rowSelStyle ??= new GUIStyle(RowStyle)
+        {
+            normal = { textColor = Color.white },
+        };
+
+        static GUIStyle HeaderStyle => _headerStyle ??= new GUIStyle(EditorStyles.boldLabel)
+        {
+            alignment = TextAnchor.MiddleLeft,
+            clipping = TextClipping.Clip,
+        };
+
+        static GUIStyle EmptyStyle => _emptyStyle ??= new GUIStyle(EditorStyles.centeredGreyMiniLabel)
+        {
+            alignment = TextAnchor.MiddleCenter,
+        };
+
+        static bool Pro => EditorGUIUtility.isProSkin;
+        static Color BgColor => Pro ? new Color(0.20f, 0.20f, 0.20f) : new Color(0.78f, 0.78f, 0.78f);
+        static Color HeaderColor => Pro ? new Color(0.27f, 0.27f, 0.27f) : new Color(0.67f, 0.67f, 0.67f);
+        static Color DividerColor => Pro ? new Color(0.13f, 0.13f, 0.13f) : new Color(0.50f, 0.50f, 0.50f);
+        static Color SelColor => new Color(0.24f, 0.48f, 0.90f, 0.9f);
+        static Color HoverColor => new Color(1f, 1f, 1f, 0.07f);
+        static Color TrackColor => Pro ? new Color(0.16f, 0.16f, 0.16f) : new Color(0.68f, 0.68f, 0.68f);
+        static Color ThumbColor => Pro ? new Color(0.45f, 0.45f, 0.45f) : new Color(0.52f, 0.52f, 0.52f);
+        static Color DropColor => new Color(0.30f, 0.80f, 0.45f, 0.35f);
+        static Color DropBorderColor => new Color(0.35f, 0.85f, 0.50f, 0.95f);
+
+        /// <summary>Draws a 1px outline just inside <paramref name="r"/>.</summary>
+        static void DrawBorder(Rect r, Color color)
+        {
+            EditorGUI.DrawRect(new Rect(r.x, r.y, r.width, 1), color);
+            EditorGUI.DrawRect(new Rect(r.x, r.yMax - 1, r.width, 1), color);
+            EditorGUI.DrawRect(new Rect(r.x, r.y, 1, r.height), color);
+            EditorGUI.DrawRect(new Rect(r.xMax - 1, r.y, 1, r.height), color);
+        }
+    }
+}

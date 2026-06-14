@@ -29,18 +29,22 @@ namespace Yozolab.Tabstep
             set => EditorPrefs.SetBool(Prefix + "NewTabBesideActive", value);
         }
 
+        /// <summary>
+        /// Give every unpinned tab the same width, shrinking them to share the bar like a
+        /// web browser (down to a minimum, after which the bar scrolls). Off sizes each tab
+        /// to its title.
+        /// </summary>
+        public static bool EqualWidthTabs
+        {
+            get => EditorPrefs.GetBool(Prefix + "EqualWidthTabs", true);
+            set => EditorPrefs.SetBool(Prefix + "EqualWidthTabs", value);
+        }
+
         /// <summary>Status bar at the bottom: folder item count and selection summary.</summary>
         public static bool ShowStatusBar
         {
             get => EditorPrefs.GetBool(Prefix + "ShowStatusBar", true);
             set => EditorPrefs.SetBool(Prefix + "ShowStatusBar", value);
-        }
-
-        /// <summary>Comma-separated type names shown as one-click search filter chips; empty hides them.</summary>
-        public static string SearchChips
-        {
-            get => EditorPrefs.GetString(Prefix + "SearchChips", "Prefab,Scene,Material,Script");
-            set => EditorPrefs.SetString(Prefix + "SearchChips", value);
         }
 
         /// <summary>Dragging an item out of the shelf consumes it (it is a hand-off, not a copy source).</summary>
@@ -94,13 +98,24 @@ namespace Yozolab.Tabstep
             set => EditorPrefs.SetBool(Prefix + "WasdSelectionNavigation", value);
         }
 
+        /// <summary>
+        /// Allow dropping assets onto folder entries in the type-column view to move them
+        /// there. Off by default — the view normally swallows drags so they fall through to
+        /// real targets (scene, object fields, the folder tree).
+        /// </summary>
+        public static bool ColumnViewFolderDrop
+        {
+            get => EditorPrefs.GetBool(Prefix + "ColumnViewFolderDrop", false);
+            set => EditorPrefs.SetBool(Prefix + "ColumnViewFolderDrop", value);
+        }
+
         public static void ResetAll()
         {
             string[] keys =
             {
                 "NewTabFolder", "MiddleClickClosesTab", "ShowNavigationBar", "MaxTabTitleLength",
                 "PingOpensNewTab", "MouseSideButtonsNavigate", "NewTabBesideActive", "ShelfOneShot",
-                "ShowStatusBar", "SearchChips", "WasdSelectionNavigation",
+                "ShowStatusBar", "WasdSelectionNavigation", "ColumnViewFolderDrop", "EqualWidthTabs",
             };
             foreach (var key in keys)
                 EditorPrefs.DeleteKey(Prefix + key);
@@ -145,6 +160,11 @@ namespace Yozolab.Tabstep
                 new GUIContent("Open New Tab Beside Active",
                     "New tabs open right of the active tab instead of at the end of the bar."),
                 TabstepSettings.NewTabBesideActive);
+            TabstepSettings.EqualWidthTabs = EditorGUILayout.Toggle(
+                new GUIContent("Equal-Width Tabs",
+                    "Give every unpinned tab the same width, shrinking them to share the bar " +
+                    "like a web browser. Off sizes each tab to its title."),
+                TabstepSettings.EqualWidthTabs);
             TabstepSettings.MaxTabTitleLength = EditorGUILayout.IntSlider(
                 new GUIContent("Max Tab Title Length"),
                 TabstepSettings.MaxTabTitleLength, 4, 60);
@@ -165,11 +185,6 @@ namespace Yozolab.Tabstep
                     "A bottom row showing the current folder's item count and a summary of " +
                     "the selected assets (count and file size)."),
                 TabstepSettings.ShowStatusBar);
-            TabstepSettings.SearchChips = EditorGUILayout.TextField(
-                new GUIContent("Search Filter Chips",
-                    "Comma-separated type names shown as one-click t: filter buttons next to " +
-                    "the search field (e.g. \"Prefab,Scene,Material,Script\"). Empty hides them."),
-                TabstepSettings.SearchChips);
             EditorGUI.indentLevel--;
 
             EditorGUILayout.Space(8);
@@ -191,6 +206,12 @@ namespace Yozolab.Tabstep
                     "folder or asset and A goes back. Inactive while typing in a text field " +
                     "(rename, search, path bar)."),
                 TabstepSettings.WasdSelectionNavigation);
+            TabstepSettings.ColumnViewFolderDrop = EditorGUILayout.Toggle(
+                new GUIContent("Column View Folder Drop",
+                    "In the type-column view, allow dropping assets onto a folder entry to move " +
+                    "them into it. Off by default — drags over the view are otherwise ignored so " +
+                    "they pass through to the scene, object fields and the folder tree."),
+                TabstepSettings.ColumnViewFolderDrop);
             EditorGUI.indentLevel--;
 
             EditorGUILayout.Space(8);
