@@ -463,12 +463,82 @@ namespace Yozolab.Tabstep
                 return;
             }
 
-            if (e.keyCode == KeyCode.F2 && BeginRename())
+            if (e.keyCode == KeyCode.F2)
             {
-                if (FindItem(_renamePath, out int ci, out int ii)) ScrollItemIntoView(ci, ii, lay);
-                host.Repaint?.Invoke();
+                if (BeginRename())
+                {
+                    if (FindItem(_renamePath, out int ci, out int ii)) ScrollItemIntoView(ci, ii, lay);
+                    host.Repaint?.Invoke();
+                    e.Use();
+                }
+                return;
+            }
+
+            // Leave keys to an active text field elsewhere (path bar, search) — never steal
+            // them. The rename field is handled above, before this point.
+            if (EditorGUIUtility.editingTextField) return;
+
+            // Enter opens the active selection (folder navigates, asset opens) — the stock
+            // browser's behaviour, which never reached the covered list. Always consume it so
+            // the hidden browser underneath never also reacts (the core invariant of this view).
+            if (e.keyCode == KeyCode.Return || e.keyCode == KeyCode.KeypadEnter)
+            {
+                OpenActiveSelection(host);
+                e.Use();
+                return;
+            }
+
+            // Delete (Cmd+Backspace on macOS) sends the selected assets to the trash, with the
+            // same confirmation the stock browser shows. Consumed unconditionally for the same
+            // reason as Enter above.
+            if (e.keyCode == KeyCode.Delete || (e.command && e.keyCode == KeyCode.Backspace))
+            {
+                DeleteSelection(host);
                 e.Use();
             }
+        }
+
+        /// <summary>
+        /// Opens the active selection like a double-click, but only when it is actually shown in
+        /// this view (mirroring <see cref="BeginRename"/>) so Enter never acts on an off-view item.
+        /// </summary>
+        bool OpenActiveSelection(Host host)
+        {
+            var path = AssetDatabase.GetAssetPath(Selection.activeObject);
+            if (string.IsNullOrEmpty(path) || !FindItem(path, out _, out _)) return false;
+            OpenItem(path, AssetDatabase.IsValidFolder(path), host);
+            return true;
+        }
+
+        /// <summary>
+        /// Sends the selected assets to the trash after a confirmation, mirroring the stock
+        /// browser's Delete. Returns false (key not consumed) only when nothing is selected;
+        /// returns true once the prompt is shown, even if the user cancels.
+        /// </summary>
+        bool DeleteSelection(Host host)
+        {
+            var paths = new List<string>();
+            foreach (var o in Selection.objects)
+            {
+                var p = AssetDatabase.GetAssetPath(o);
+                if (!string.IsNullOrEmpty(p)) paths.Add(p);
+            }
+            if (paths.Count == 0) return false;
+
+            string message = paths.Count == 1
+                ? $"\"{Path.GetFileName(paths[0])}\" will be moved to the trash.\nYou can restore it from there."
+                : $"{paths.Count} assets will be moved to the trash.\nYou can restore them from there.";
+            if (!EditorUtility.DisplayDialog("Delete selected assets?", message, "Delete", "Cancel"))
+                return true; // prompt dismissed — still consume the key so the browser stays inert
+
+            var failed = new List<string>();
+            if (!AssetDatabase.MoveAssetsToTrash(paths.ToArray(), failed) || failed.Count > 0)
+                Debug.LogWarning($"Tabstep: some assets could not be deleted: {string.Join(", ", failed)}");
+            Selection.objects = System.Array.Empty<Object>();
+            _selectionAnchor = null;
+            ProjectVersion++; // rebuild without resetting the scroll (MarkDirty would)
+            host.Repaint?.Invoke();
+            return true;
         }
 
         /// <summary>
