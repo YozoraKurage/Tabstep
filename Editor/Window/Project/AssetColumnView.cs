@@ -136,6 +136,14 @@ namespace Yozolab.Tabstep
         // across). Cleared when the shown folder changes.
         string _selectionAnchor;
 
+        // Inline rename overlay (F2), mirroring the stock browser: a text field drawn over
+        // the selected row's label that commits on Enter / focus loss, cancels on Escape,
+        // keeps the file extension, and reselects the renamed asset. Null path = not renaming.
+        const string RenameControlName = "TabstepColumnRename";
+        string _renamePath;
+        string _renameText;
+        bool _renameFocusPending;
+
         class Column
         {
             public string Label;
@@ -184,7 +192,14 @@ namespace Yozolab.Tabstep
                     if (hover != _hoverPath) { _hoverPath = hover; host.Repaint?.Invoke(); }
                     break;
 
+                case EventType.KeyDown:
+                    HandleKeyDown(e, lay, host);
+                    break;
+
                 case EventType.MouseDown:
+                    // A click anywhere commits an in-progress rename first (as the stock
+                    // browser does), then the click proceeds to select/open as usual.
+                    if (_renamePath != null) { CommitRename(); EnsureBuilt(folder, key, descending); }
                     if (lay.NeedH && lay.HBar.Contains(e.mousePosition)) { BeginThumbDrag(lay, true, e); e.Use(); break; }
                     if (lay.NeedV && lay.VBar.Contains(e.mousePosition)) { BeginThumbDrag(lay, false, e); e.Use(); break; }
                     if (!lay.Viewport.Contains(e.mousePosition)) break;
@@ -325,43 +340,51 @@ namespace Yozolab.Tabstep
 
         public void Draw(Rect listRect, string folder, AssetSortKey key, bool descending)
         {
-            if (Event.current.type != EventType.Repaint) return;
             EnsureBuilt(folder, key, descending);
             var lay = Measure(listRect);
 
-            var ping = PingTracker.Active(out float pingProgress);
-            _pingPath = ping;
-            _pingAlpha = ping != null ? PingAlpha(pingProgress) : 0f;
-
-            EditorGUI.DrawRect(listRect, BgColor);
-
-            if (_columns.Count == 0)
+            if (Event.current.type == EventType.Repaint)
             {
-                GUI.Label(listRect, "This folder is empty.", EmptyStyle);
-                return;
-            }
+                var ping = PingTracker.Active(out float pingProgress);
+                _pingPath = ping;
+                _pingAlpha = ping != null ? PingAlpha(pingProgress) : 0f;
 
-            var selected = SelectedPaths();
-            var offset = new Vector2(-_scroll.x, -_scroll.y);
-            GUI.BeginClip(lay.Viewport);
-            for (int ci = 0; ci < _columns.Count; ci++)
-            {
-                var col = _columns[ci];
-                float colX = Padding + ci * (ColumnWidth + ColumnGap) + offset.x;
-                if (colX > lay.Viewport.width || colX + ColumnWidth < 0) continue; // off-screen column
+                EditorGUI.DrawRect(listRect, BgColor);
 
-                DrawHeader(new Rect(colX, offset.y, ColumnWidth, HeaderHeight), col);
-                for (int ii = 0; ii < col.Items.Count; ii++)
+                if (_columns.Count == 0)
                 {
-                    float y = HeaderHeight + Padding + ii * RowHeight + offset.y;
-                    if (y >= lay.Viewport.height || y + RowHeight <= 0) continue; // off-screen row
-                    DrawRow(new Rect(colX, y, ColumnWidth, RowHeight), col.Items[ii], selected);
+                    GUI.Label(listRect, "This folder is empty.", EmptyStyle);
+                }
+                else
+                {
+                    var selected = SelectedPaths();
+                    var offset = new Vector2(-_scroll.x, -_scroll.y);
+                    GUI.BeginClip(lay.Viewport);
+                    for (int ci = 0; ci < _columns.Count; ci++)
+                    {
+                        var col = _columns[ci];
+                        float colX = Padding + ci * (ColumnWidth + ColumnGap) + offset.x;
+                        if (colX > lay.Viewport.width || colX + ColumnWidth < 0) continue; // off-screen column
+
+                        DrawHeader(new Rect(colX, offset.y, ColumnWidth, HeaderHeight), col);
+                        for (int ii = 0; ii < col.Items.Count; ii++)
+                        {
+                            float y = HeaderHeight + Padding + ii * RowHeight + offset.y;
+                            if (y >= lay.Viewport.height || y + RowHeight <= 0) continue; // off-screen row
+                            DrawRow(new Rect(colX, y, ColumnWidth, RowHeight), col.Items[ii], selected);
+                        }
+                    }
+                    GUI.EndClip();
+
+                    if (lay.NeedH) DrawScrollbar(lay, true);
+                    if (lay.NeedV) DrawScrollbar(lay, false);
                 }
             }
-            GUI.EndClip();
 
-            if (lay.NeedH) DrawScrollbar(lay, true);
-            if (lay.NeedV) DrawScrollbar(lay, false);
+            // The inline rename field is an interactive control, so it must run on every
+            // event pass (not just Repaint), and it paints after the columns so it lands on
+            // top of the row it edits.
+            if (_renamePath != null) DrawRenameOverlay(lay);
         }
 
         void DrawHeader(Rect r, Column col)
@@ -391,6 +414,9 @@ namespace Yozolab.Tabstep
             var iconRect = new Rect(r.x + 4, r.y + (r.height - IconSize) / 2, IconSize, IconSize);
             if (icon != null) GUI.DrawTexture(iconRect, icon, ScaleMode.ScaleToFit);
 
+            // The row being renamed has its label replaced by the rename text field overlay.
+            if (item.Path == _renamePath) return;
+
             var labelRect = new Rect(iconRect.xMax + 4, r.y, r.xMax - iconRect.xMax - 6, r.height);
             GUI.Label(labelRect, item.Name, isSelected ? RowSelStyle : RowStyle);
 
@@ -413,6 +439,207 @@ namespace Yozolab.Tabstep
             var (track, thumb) = ThumbRects(lay, horizontal);
             EditorGUI.DrawRect(track, TrackColor);
             EditorGUI.DrawRect(thumb, ThumbColor);
+        }
+
+        // ---- inline rename (F2) --------------------------------------------------
+
+        void HandleKeyDown(Event e, Layout lay, Host host)
+        {
+            if (_renamePath != null)
+            {
+                if (e.keyCode == KeyCode.Return || e.keyCode == KeyCode.KeypadEnter)
+                {
+                    CommitRename();
+                    host.Repaint?.Invoke();
+                    e.Use();
+                }
+                else if (e.keyCode == KeyCode.Escape)
+                {
+                    EndRename();
+                    host.Repaint?.Invoke();
+                    e.Use();
+                }
+                // Other keys (the typing itself) fall through to the text field in Draw.
+                return;
+            }
+
+            if (e.keyCode == KeyCode.F2)
+            {
+                if (BeginRename())
+                {
+                    if (FindItem(_renamePath, out int ci, out int ii)) ScrollItemIntoView(ci, ii, lay);
+                    host.Repaint?.Invoke();
+                    e.Use();
+                }
+                return;
+            }
+
+            // Leave keys to an active text field elsewhere (path bar, search) — never steal
+            // them. The rename field is handled above, before this point.
+            if (EditorGUIUtility.editingTextField) return;
+
+            // Enter opens the active selection (folder navigates, asset opens) — the stock
+            // browser's behaviour, which never reached the covered list. Always consume it so
+            // the hidden browser underneath never also reacts (the core invariant of this view).
+            if (e.keyCode == KeyCode.Return || e.keyCode == KeyCode.KeypadEnter)
+            {
+                OpenActiveSelection(host);
+                e.Use();
+                return;
+            }
+
+            // Delete (Cmd+Backspace on macOS) sends the selected assets to the trash, with the
+            // same confirmation the stock browser shows. Consumed unconditionally for the same
+            // reason as Enter above.
+            if (e.keyCode == KeyCode.Delete || (e.command && e.keyCode == KeyCode.Backspace))
+            {
+                DeleteSelection(host);
+                e.Use();
+            }
+        }
+
+        /// <summary>
+        /// Opens the active selection like a double-click, but only when it is actually shown in
+        /// this view (mirroring <see cref="BeginRename"/>) so Enter never acts on an off-view item.
+        /// </summary>
+        bool OpenActiveSelection(Host host)
+        {
+            var path = AssetDatabase.GetAssetPath(Selection.activeObject);
+            if (string.IsNullOrEmpty(path) || !FindItem(path, out _, out _)) return false;
+            OpenItem(path, AssetDatabase.IsValidFolder(path), host);
+            return true;
+        }
+
+        /// <summary>
+        /// Sends the selected assets to the trash after a confirmation, mirroring the stock
+        /// browser's Delete. Returns false (key not consumed) only when nothing is selected;
+        /// returns true once the prompt is shown, even if the user cancels.
+        /// </summary>
+        bool DeleteSelection(Host host)
+        {
+            var paths = new List<string>();
+            foreach (var o in Selection.objects)
+            {
+                var p = AssetDatabase.GetAssetPath(o);
+                if (!string.IsNullOrEmpty(p)) paths.Add(p);
+            }
+            if (paths.Count == 0) return false;
+
+            string message = paths.Count == 1
+                ? $"\"{Path.GetFileName(paths[0])}\" will be moved to the trash.\nYou can restore it from there."
+                : $"{paths.Count} assets will be moved to the trash.\nYou can restore them from there.";
+            if (!EditorUtility.DisplayDialog("Delete selected assets?", message, "Delete", "Cancel"))
+                return true; // prompt dismissed — still consume the key so the browser stays inert
+
+            var failed = new List<string>();
+            if (!AssetDatabase.MoveAssetsToTrash(paths.ToArray(), failed) || failed.Count > 0)
+                Debug.LogWarning($"Tabstep: some assets could not be deleted: {string.Join(", ", failed)}");
+            Selection.objects = System.Array.Empty<Object>();
+            _selectionAnchor = null;
+            ProjectVersion++; // rebuild without resetting the scroll (MarkDirty would)
+            host.Repaint?.Invoke();
+            return true;
+        }
+
+        /// <summary>
+        /// Starts renaming the selected item — the active object when it is shown here,
+        /// otherwise the first selected item in reading order. Returns false when nothing
+        /// renameable is selected in this view.
+        /// </summary>
+        bool BeginRename()
+        {
+            string target = null;
+            var active = AssetDatabase.GetAssetPath(Selection.activeObject);
+            if (!string.IsNullOrEmpty(active) && FindItem(active, out _, out _))
+            {
+                target = active;
+            }
+            else
+            {
+                var selected = SelectedPaths();
+                foreach (var path in FlattenedPaths())
+                    if (selected.Contains(path)) { target = path; break; }
+            }
+            if (target == null) return false;
+
+            _renamePath = target;
+            _renameText = AssetDatabase.IsValidFolder(target)
+                ? Path.GetFileName(target)
+                : Path.GetFileNameWithoutExtension(target);
+            _renameFocusPending = true;
+            return true;
+        }
+
+        /// <summary>
+        /// Draws the rename text field over the edited row and drives focus. The field paints
+        /// on top of the columns; the underlying row's label is suppressed in <see cref="DrawRow"/>.
+        /// </summary>
+        void DrawRenameOverlay(Layout lay)
+        {
+            if (!FindItem(_renamePath, out int ci, out int ii)) { EndRename(); return; }
+
+            float colX = lay.Viewport.x + Padding + ci * (ColumnWidth + ColumnGap) - _scroll.x;
+            float y = lay.Viewport.y + HeaderHeight + Padding + ii * RowHeight - _scroll.y;
+            var rowRect = new Rect(colX, y, ColumnWidth, RowHeight);
+            if (!lay.Viewport.Overlaps(rowRect)) return; // scrolled out of view this frame
+
+            var fieldRect = new Rect(rowRect.x + IconSize + 8, rowRect.y + 1,
+                Mathf.Max(20f, rowRect.width - IconSize - 12), rowRect.height - 2);
+
+            GUI.SetNextControlName(RenameControlName);
+            _renameText = GUI.TextField(fieldRect, _renameText ?? string.Empty, RenameStyle);
+
+            if (_renameFocusPending)
+            {
+                EditorGUI.FocusTextInControl(RenameControlName); // focuses and selects the name
+                if (GUI.GetNameOfFocusedControl() == RenameControlName) _renameFocusPending = false;
+            }
+            else if (Event.current.type == EventType.Repaint &&
+                     GUI.GetNameOfFocusedControl() != RenameControlName)
+            {
+                // Focus moved elsewhere (e.g. another window) — commit, like the stock browser.
+                CommitRename();
+            }
+        }
+
+        /// <summary>Applies the edited name via the asset database and reselects the result.</summary>
+        void CommitRename()
+        {
+            string path = _renamePath;
+            string text = (_renameText ?? string.Empty).Trim();
+            EndRename();
+            if (string.IsNullOrEmpty(path)) return;
+
+            bool isFolder = AssetDatabase.IsValidFolder(path);
+            string current = isFolder ? Path.GetFileName(path) : Path.GetFileNameWithoutExtension(path);
+            if (string.IsNullOrEmpty(text) || text == current) return;
+
+            string error = AssetDatabase.RenameAsset(path, text); // keeps the extension itself
+            if (!string.IsNullOrEmpty(error))
+            {
+                Debug.LogWarning($"Tabstep: could not rename \"{path}\": {error}");
+                return;
+            }
+
+            // Reselect the asset at its new path so the selection follows the rename.
+            string parent = ParentFolder(path);
+            string ext = isFolder ? string.Empty : Path.GetExtension(path);
+            string newPath = (parent.Length == 0 ? string.Empty : parent + "/") + text + ext;
+            var obj = AssetDatabase.LoadMainAssetAtPath(newPath);
+            if (obj != null) { Selection.activeObject = obj; _selectionAnchor = newPath; }
+            // Force a rebuild for the new name without resetting the scroll (which MarkDirty,
+            // by clearing the built folder, would do — EnsureBuilt resets scroll on a folder
+            // change). projectChanged fires too, but not necessarily within this same event.
+            ProjectVersion++;
+        }
+
+        /// <summary>Ends the rename without applying it and releases the text field focus.</summary>
+        void EndRename()
+        {
+            _renamePath = null;
+            _renameText = null;
+            _renameFocusPending = false;
+            if (GUI.GetNameOfFocusedControl() == RenameControlName) GUI.FocusControl(null);
         }
 
         // ---- geometry ------------------------------------------------------------
@@ -762,6 +989,7 @@ namespace Yozolab.Tabstep
             {
                 _scroll = Vector2.zero;
                 _selectionAnchor = null;
+                if (_renamePath != null) EndRename(); // a pending rename does not survive navigation
             }
 
             _builtFolder = folder;
@@ -937,7 +1165,7 @@ namespace Yozolab.Tabstep
 
         // ---- styles & colours ----------------------------------------------------
 
-        static GUIStyle _rowStyle, _rowSelStyle, _headerStyle, _emptyStyle;
+        static GUIStyle _rowStyle, _rowSelStyle, _headerStyle, _emptyStyle, _renameStyle;
 
         static GUIStyle RowStyle => _rowStyle ??= new GUIStyle(EditorStyles.label)
         {
@@ -960,6 +1188,11 @@ namespace Yozolab.Tabstep
         static GUIStyle EmptyStyle => _emptyStyle ??= new GUIStyle(EditorStyles.centeredGreyMiniLabel)
         {
             alignment = TextAnchor.MiddleCenter,
+        };
+
+        static GUIStyle RenameStyle => _renameStyle ??= new GUIStyle(EditorStyles.textField)
+        {
+            alignment = TextAnchor.MiddleLeft,
         };
 
         static bool Pro => EditorGUIUtility.isProSkin;
