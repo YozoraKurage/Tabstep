@@ -838,6 +838,12 @@ namespace Yozolab.Tabstep
             _renameText = null;
             _renameFocusPending = false;
             if (GUI.GetNameOfFocusedControl() == RenameControlName) GUI.FocusControl(null);
+            // IMGUI keeps `editingTextField` set after the text field's control id
+            // is gone; if we leave it, HandleKeyDown's "leave keys to a text field"
+            // early-out swallows every Up/Down/Left/Right until the user clicks
+            // somewhere. Clear it explicitly so arrow navigation resumes the moment
+            // the rename ends.
+            EditorGUIUtility.editingTextField = false;
         }
 
         // ---- geometry ------------------------------------------------------------
