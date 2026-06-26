@@ -246,23 +246,29 @@ namespace Yozolab.Tabstep
                     // switches the Inspector to the wrong object. Swallow the drag here so only
                     // real drop targets elsewhere (scene, object fields, the folder tree) act.
                     //
-                    // Opt-in: dropping onto a folder entry moves the dragged assets into it.
+                    // Drops over a specific folder entry (opt-in) move there; otherwise the
+                    // drop falls into the shown folder itself — the natural target after a
+                    // spring-load brought us to a sibling tab.
                     if (listRect.Contains(e.mousePosition))
                     {
                         var dropFolder = TabstepSettings.ColumnViewFolderDrop
                             ? FolderDropTarget(e.mousePosition, lay) : null;
-                        if (dropFolder != null)
+                        string dropTo = dropFolder ?? (CanDropIntoCurrent(folder) ? folder : null);
+                        if (dropTo != null)
                         {
                             DragAndDrop.visualMode = DragAndDropVisualMode.Move;
                             if (e.type == EventType.DragPerform)
                             {
                                 DragAndDrop.AcceptDrag();
-                                MoveAssetsInto(dropFolder);
+                                MoveAssetsInto(dropTo);
                                 _dropFolder = null;
                             }
                             else
                             {
-                                _dropFolder = dropFolder; // highlight it while hovering
+                                // Highlight only the explicit folder row, never the bare
+                                // viewport — the latter would feel like the whole pane is
+                                // selected as a target.
+                                _dropFolder = dropFolder;
                             }
                         }
                         else
@@ -1148,11 +1154,30 @@ namespace Yozolab.Tabstep
             return null;
         }
 
+        /// <summary>
+        /// True when at least one dragged asset would actually move into
+        /// <paramref name="folder"/> — i.e. it exists outside the folder and is not the
+        /// folder itself. Used so the cursor only shows "Move" while a real drop would
+        /// happen; an empty viewport drop and a same-folder drop both leave it as None.
+        /// </summary>
+        static bool CanDropIntoCurrent(string folder)
+        {
+            if (string.IsNullOrEmpty(folder)) return false;
+            foreach (var path in CollectDraggedAssetPaths())
+            {
+                if (path == folder || ParentFolder(path) == folder) continue;
+                if (AssetDatabase.IsValidFolder(path) &&
+                    folder.StartsWith(path + "/", StringComparison.Ordinal)) continue;
+                return true;
+            }
+            return false;
+        }
+
         /// <summary>Moves the dragged assets into <paramref name="folder"/>, skipping no-ops.</summary>
         static void MoveAssetsInto(string folder)
         {
-            var paths = DragAndDrop.paths;
-            if (paths == null || paths.Length == 0) return;
+            var paths = CollectDraggedAssetPaths();
+            if (paths.Count == 0) return;
             AssetDatabase.StartAssetEditing();
             try
             {
@@ -1172,6 +1197,30 @@ namespace Yozolab.Tabstep
                 AssetDatabase.StopAssetEditing();
                 AssetDatabase.Refresh();
             }
+        }
+
+        /// <summary>
+        /// Asset paths of the current drag, unioned from <see cref="DragAndDrop.paths"/>
+        /// and <see cref="DragAndDrop.objectReferences"/> — the stock browser's tree pane
+        /// only populates the latter, so reading just paths missed tree drags.
+        /// </summary>
+        static List<string> CollectDraggedAssetPaths()
+        {
+            var seen = new HashSet<string>(StringComparer.Ordinal);
+            var result = new List<string>();
+            foreach (var raw in DragAndDrop.paths)
+            {
+                if (string.IsNullOrEmpty(raw) || !seen.Add(raw)) continue;
+                result.Add(raw);
+            }
+            foreach (var obj in DragAndDrop.objectReferences)
+            {
+                if (obj == null) continue;
+                var path = AssetDatabase.GetAssetPath(obj);
+                if (string.IsNullOrEmpty(path) || !seen.Add(path)) continue;
+                result.Add(path);
+            }
+            return result;
         }
 
         static string ParentFolder(string path)
