@@ -101,6 +101,13 @@ namespace Yozolab.Tabstep
                 return p.Length == 2 && p[0].ParameterType == typeof(int[]) && p[1].ParameterType == typeof(bool);
             });
 
+        // public void InitSelection(int[] selectedInstanceIDs) on ObjectListArea — the
+        // list pane's selection store. Selection.assetGUIDs / Export Package / Find
+        // References query this on the last-interacted browser, so it must mirror the
+        // user's column-view selection or those features see a stale list.
+        static readonly MethodInfo ListAreaInitSelectionMethod = ListAreaField?.FieldType
+            .GetMethod("InitSelection", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
+
         static MethodInfo FindMethod(string name, int paramCount)
         {
             return BrowserType?
@@ -449,6 +456,29 @@ namespace Yozolab.Tabstep
         {
             if (_browser == null) return null;
             return ProjectPaths.Normalize(Invoke(GetActiveFolderPathMethod) as string);
+        }
+
+        /// <summary>
+        /// Mirrors a list of instance ids into the embedded browser's list-area
+        /// selection. <see cref="Selection"/>.assetGUIDs and features built on it
+        /// (Assets/Export Package..., Find References in Project, ...) read this on
+        /// the last-interacted ProjectBrowser, so the column view must push its own
+        /// selection here or those features see whatever was selected before.
+        /// </summary>
+        public void SyncListAreaSelection(int[] selectedInstanceIDs)
+        {
+            if (_browser == null || ListAreaField == null || ListAreaInitSelectionMethod == null) return;
+            try
+            {
+                var listArea = ListAreaField.GetValue(_browser);
+                if (listArea == null) return;
+                ListAreaInitSelectionMethod.Invoke(listArea, new object[] { selectedInstanceIDs ?? Array.Empty<int>() });
+            }
+            catch (Exception e)
+            {
+                if (_warnedMethods.Add("InitSelection"))
+                    Debug.LogWarning($"[Tabstep] Could not sync the embedded browser's selection: {e}");
+            }
         }
 
         /// <summary>Points the embedded browser at a folder. False when the folder no longer exists.</summary>

@@ -328,6 +328,11 @@ namespace Yozolab.Tabstep
         void OnSelectionChange()
         {
             _statusSelectionTime = 0; // recompute on the next repaint
+            // The embedded browser's list-area selection backs Selection.assetGUIDs and
+            // the Assets/Export Package... / Find References menus when this is the
+            // last-interacted browser; without this push it stays at whatever was
+            // selected before the column view took over.
+            _host?.SyncListAreaSelection(Selection.instanceIDs);
             Repaint();
         }
 

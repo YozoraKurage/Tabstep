@@ -246,21 +246,36 @@ namespace Yozolab.Tabstep
                     // switches the Inspector to the wrong object. Swallow the drag here so only
                     // real drop targets elsewhere (scene, object fields, the folder tree) act.
                     //
-                    // Drops over a specific folder entry (opt-in) move there; otherwise the
-                    // drop falls into the shown folder itself — the natural target after a
-                    // spring-load brought us to a sibling tab.
+                    // Drops over a specific folder entry (opt-in) target that folder; otherwise
+                    // the shown folder itself, the natural target after a spring-load brought us
+                    // to a sibling tab. Scene GameObjects in the drag become brand-new prefabs
+                    // there (Copy mode), matching the stock browser's Hierarchy → Project drop.
                     if (listRect.Contains(e.mousePosition))
                     {
-                        var dropFolder = TabstepSettings.ColumnViewFolderDrop
-                            ? FolderDropTarget(e.mousePosition, lay) : null;
-                        string dropTo = dropFolder ?? (CanDropIntoCurrent(folder) ? folder : null);
-                        if (dropTo != null)
+                        string hoveredFolder = null;
+                        if (TabstepSettings.ColumnViewFolderDrop)
                         {
-                            DragAndDrop.visualMode = DragAndDropVisualMode.Move;
+                            var hit = HitTest(e.mousePosition, lay, out bool isFolder);
+                            if (isFolder) hoveredFolder = hit;
+                        }
+                        string dropTo = hoveredFolder ?? folder;
+                        var sceneRoots = CollectSceneRootsForPrefab();
+                        var draggedPaths = CollectDraggedAssetPaths();
+                        bool willCreatePrefabs = sceneRoots.Count > 0
+                            && !string.IsNullOrEmpty(dropTo)
+                            && AssetDatabase.IsValidFolder(dropTo);
+                        bool willMoveAssets = !willCreatePrefabs
+                            && HasMoveableAssetInto(dropTo, draggedPaths);
+                        if (willCreatePrefabs || willMoveAssets)
+                        {
+                            DragAndDrop.visualMode = willCreatePrefabs
+                                ? DragAndDropVisualMode.Copy
+                                : DragAndDropVisualMode.Move;
                             if (e.type == EventType.DragPerform)
                             {
                                 DragAndDrop.AcceptDrag();
-                                MoveAssetsInto(dropTo);
+                                if (willCreatePrefabs) CreatePrefabsInto(dropTo, sceneRoots);
+                                else MoveAssetsInto(dropTo, draggedPaths);
                                 _dropFolder = null;
                             }
                             else
@@ -268,7 +283,7 @@ namespace Yozolab.Tabstep
                                 // Highlight only the explicit folder row, never the bare
                                 // viewport — the latter would feel like the whole pane is
                                 // selected as a target.
-                                _dropFolder = dropFolder;
+                                _dropFolder = hoveredFolder;
                             }
                         }
                         else
@@ -1138,33 +1153,17 @@ namespace Yozolab.Tabstep
         }
 
         /// <summary>
-        /// The folder under <paramref name="mouse"/> that the current drag could move into,
-        /// or null when the cursor isn't over a folder or nothing movable is being dragged.
-        /// </summary>
-        string FolderDropTarget(Vector2 mouse, Layout lay)
-        {
-            var path = HitTest(mouse, lay, out bool isFolder);
-            if (!isFolder || path == null) return null;
-            var paths = DragAndDrop.paths;
-            if (paths == null || paths.Length == 0) return null;
-            // At least one dragged asset must not already live in the target folder.
-            foreach (var p in paths)
-                if (!string.IsNullOrEmpty(p) && ParentFolder(p) != path && p != path)
-                    return path;
-            return null;
-        }
-
-        /// <summary>
-        /// True when at least one dragged asset would actually move into
+        /// True when at least one path in <paramref name="paths"/> would actually move into
         /// <paramref name="folder"/> — i.e. it exists outside the folder and is not the
         /// folder itself. Used so the cursor only shows "Move" while a real drop would
         /// happen; an empty viewport drop and a same-folder drop both leave it as None.
         /// </summary>
-        static bool CanDropIntoCurrent(string folder)
+        static bool HasMoveableAssetInto(string folder, List<string> paths)
         {
-            if (string.IsNullOrEmpty(folder)) return false;
-            foreach (var path in CollectDraggedAssetPaths())
+            if (string.IsNullOrEmpty(folder) || paths == null || paths.Count == 0) return false;
+            foreach (var path in paths)
             {
+                if (string.IsNullOrEmpty(path)) continue;
                 if (path == folder || ParentFolder(path) == folder) continue;
                 if (AssetDatabase.IsValidFolder(path) &&
                     folder.StartsWith(path + "/", StringComparison.Ordinal)) continue;
@@ -1173,11 +1172,10 @@ namespace Yozolab.Tabstep
             return false;
         }
 
-        /// <summary>Moves the dragged assets into <paramref name="folder"/>, skipping no-ops.</summary>
-        static void MoveAssetsInto(string folder)
+        /// <summary>Moves <paramref name="paths"/> into <paramref name="folder"/>, skipping no-ops.</summary>
+        static void MoveAssetsInto(string folder, List<string> paths)
         {
-            var paths = CollectDraggedAssetPaths();
-            if (paths.Count == 0) return;
+            if (paths == null || paths.Count == 0) return;
             AssetDatabase.StartAssetEditing();
             try
             {
@@ -1221,6 +1219,55 @@ namespace Yozolab.Tabstep
                 result.Add(path);
             }
             return result;
+        }
+
+        /// <summary>
+        /// Non-persistent <see cref="GameObject"/>s in the drag — scene roots eligible
+        /// to be saved out as brand-new prefab assets. Returns an empty list when the
+        /// drag carries only project assets.
+        /// </summary>
+        static List<GameObject> CollectSceneRootsForPrefab()
+        {
+            var result = new List<GameObject>();
+            foreach (var obj in DragAndDrop.objectReferences)
+            {
+                if (obj is GameObject go && !EditorUtility.IsPersistent(go))
+                    result.Add(go);
+            }
+            return result;
+        }
+
+        /// <summary>
+        /// Saves each <paramref name="sceneRoots"/> GameObject as a fresh prefab under
+        /// <paramref name="folder"/> and reconnects the scene instance to it — what the
+        /// stock browser does for a Hierarchy → Project drop.
+        /// </summary>
+        static void CreatePrefabsInto(string folder, List<GameObject> sceneRoots)
+        {
+            if (string.IsNullOrEmpty(folder) || !AssetDatabase.IsValidFolder(folder)) return;
+            AssetDatabase.StartAssetEditing();
+            try
+            {
+                foreach (var go in sceneRoots)
+                {
+                    if (go == null) continue;
+                    string baseName = string.IsNullOrEmpty(go.name) ? "GameObject" : go.name;
+                    string dest = AssetDatabase.GenerateUniqueAssetPath(folder + "/" + baseName + ".prefab");
+                    try
+                    {
+                        PrefabUtility.SaveAsPrefabAssetAndConnect(go, dest, InteractionMode.UserAction);
+                    }
+                    catch (Exception e)
+                    {
+                        Debug.LogWarning($"Tabstep: could not save \"{go.name}\" as a prefab at \"{dest}\": {e}");
+                    }
+                }
+            }
+            finally
+            {
+                AssetDatabase.StopAssetEditing();
+                AssetDatabase.Refresh();
+            }
         }
 
         static string ParentFolder(string path)
