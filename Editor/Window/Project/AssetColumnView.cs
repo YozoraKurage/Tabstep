@@ -515,7 +515,99 @@ namespace Yozolab.Tabstep
             {
                 DeleteSelection(host);
                 e.Use();
+                return;
             }
+
+            // Arrow-key selection — Up/Down walk the current type column, Left/Right
+            // step across to the previous/next column. Shift extends the selection
+            // from the anchor, matching plain/Shift-click. Always consume them so the
+            // hidden browser underneath never also acts on the same key.
+            if (e.keyCode == KeyCode.UpArrow || e.keyCode == KeyCode.DownArrow ||
+                e.keyCode == KeyCode.LeftArrow || e.keyCode == KeyCode.RightArrow ||
+                e.keyCode == KeyCode.Home || e.keyCode == KeyCode.End)
+            {
+                if (MoveSelection(e, lay, host)) e.Use();
+            }
+        }
+
+        // ---- arrow-key selection -----------------------------------------------
+
+        /// <summary>
+        /// Moves the active selection one step in the direction of <paramref name="e"/>,
+        /// or jumps to the first/last item on Home/End. Returns false when there is
+        /// nothing to step through (empty folder) so the key is left for other handlers.
+        /// </summary>
+        bool MoveSelection(Event e, Layout lay, Host host)
+        {
+            if (_columns.Count == 0) return false;
+
+            // Where the cursor currently sits in the grid. With no selection shown
+            // in this view (nothing active, or active item lives outside the
+            // columns) the first arrow press just lands on (0,0), like the stock
+            // browser's first Down/Right into an unfocused list.
+            int ci = -1, ii = -1;
+            var activePath = AssetDatabase.GetAssetPath(Selection.activeObject);
+            bool hasAnchor = !string.IsNullOrEmpty(activePath) && FindItem(activePath, out ci, out ii);
+            int newCi, newIi;
+            if (!hasAnchor)
+            {
+                // No prior selection here — any arrow lands on the first item.
+                newCi = 0;
+                newIi = 0;
+            }
+            else
+            {
+                newCi = ci;
+                newIi = ii;
+                switch (e.keyCode)
+                {
+                    case KeyCode.UpArrow:
+                        newIi = Mathf.Max(0, ii - 1);
+                        break;
+                    case KeyCode.DownArrow:
+                        newIi = Mathf.Min(_columns[ci].Items.Count - 1, ii + 1);
+                        break;
+                    case KeyCode.LeftArrow:
+                        newCi = Mathf.Max(0, ci - 1);
+                        // The previous column may be shorter — clamp so we land on a real row.
+                        newIi = Mathf.Min(ii, _columns[newCi].Items.Count - 1);
+                        break;
+                    case KeyCode.RightArrow:
+                        newCi = Mathf.Min(_columns.Count - 1, ci + 1);
+                        newIi = Mathf.Min(ii, _columns[newCi].Items.Count - 1);
+                        break;
+                    case KeyCode.Home:
+                        newCi = 0;
+                        newIi = 0;
+                        break;
+                    case KeyCode.End:
+                        newCi = _columns.Count - 1;
+                        newIi = _columns[newCi].Items.Count - 1;
+                        break;
+                }
+            }
+            if (newCi == ci && newIi == ii) return true; // already there — consume but no-op
+
+            string newPath = _columns[newCi].Items[newIi].Path;
+            var obj = AssetDatabase.LoadMainAssetAtPath(newPath);
+            if (obj == null) return true; // phantom row or missing asset — swallow but no selection change
+
+            if (e.shift)
+            {
+                // Extend from the anchor (set on the last plain selection) to the new
+                // item, matching Shift+click. SelectRange leaves the anchor in place
+                // so the next Shift+arrow stretches further in either direction.
+                SelectRange(newPath, additive: false);
+                Selection.activeObject = obj;
+            }
+            else
+            {
+                Selection.activeObject = obj;
+                _selectionAnchor = newPath;
+            }
+            ScrollItemIntoView(newCi, newIi, lay);
+            host.Repaint?.Invoke();
+            return true;
         }
 
         /// <summary>
