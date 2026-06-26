@@ -212,6 +212,7 @@ namespace Yozolab.Tabstep
                 OpenFolderInNewTab = OpenInNewTab,
                 Repaint = Repaint,
                 MarkBrowserInteracted = _host.MarkAsLastInteracted,
+                TakePendingCreation = () => AssetCreationBridge.Take(this),
             };
             if (_session.Count == 0)
                 _session.OpenTab(ValidFolderOrDefault(null));
@@ -328,6 +329,23 @@ namespace Yozolab.Tabstep
         {
             _statusSelectionTime = 0; // recompute on the next repaint
             Repaint();
+        }
+
+        /// <summary>
+        /// True while the active tab covers the embedded browser's list pane with the
+        /// column view AND the new asset's parent folder matches the tab — so the
+        /// phantom row has somewhere to land. Tree-pane creates that target a different
+        /// folder return false here and run the embedded browser's normal flow.
+        /// </summary>
+        internal bool ShouldInterceptNewAssetRename(string newAssetPath)
+        {
+            var tab = _session.ActiveTab;
+            if (tab == null || tab.ViewMode != ItemViewMode.TypeColumns) return false;
+            if (_host == null || _host.IsSearching()) return false;
+            if (string.IsNullOrEmpty(newAssetPath) || string.IsNullOrEmpty(tab.CurrentPath)) return false;
+            int slash = newAssetPath.LastIndexOf('/');
+            string parent = slash <= 0 ? string.Empty : newAssetPath.Substring(0, slash);
+            return parent == tab.CurrentPath;
         }
 
         void ShowPathBarContextMenu()

@@ -135,6 +135,9 @@ namespace Yozolab.Tabstep
                 ParentField?.SetValue(_browser, null);
                 Object.DestroyImmediate(_browser);
             }
+            // Drop any captured Assets/Create/... request the owner never got around
+            // to consuming, so it does not leak into the next browser instance.
+            AssetCreationBridge.Discard(_owner);
             _browser = null;
         }
 
@@ -147,7 +150,7 @@ namespace Yozolab.Tabstep
             // Never saved into the layout file — the host window owns and recreates it.
             _browser.hideFlags = HideFlags.HideAndDontSave;
             // Opt this instance into the compact-layout Harmony patches (no-op without Harmony).
-            ProjectBrowserPatcher.Register(_browser);
+            ProjectBrowserPatcher.Register(_browser, _owner);
             AttachToOwner();
             // Init sizes its panes from `position`, so swap the placeholder rect a
             // fresh instance carries for the owner's size before running it.

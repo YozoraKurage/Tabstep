@@ -81,6 +81,10 @@ namespace Yozolab.Tabstep
             public Action<string> OpenFolderInNewTab;  // middle-click a folder column entry
             public Action Repaint;
             public Action MarkBrowserInteracted;        // so the Assets/Create menu targets our folder
+            // A freshly invoked Assets/Create/... request to drive in the column view
+            // (captured by ProjectBrowserPatcher so the embedded browser's own — and
+            // invisible — rename overlay never runs). Null when nothing is pending.
+            public Func<AssetCreationBridge.Request> TakePendingCreation;
         }
 
         // ---- layout constants ----
@@ -104,6 +108,9 @@ namespace Yozolab.Tabstep
         AssetSortKey _builtKey;
         bool _builtDescending;
         int _builtVersion = -1;
+        // The in-flight Assets/Create/... path baked into the last build, so the
+        // phantom row appears/disappears when the request arrives or completes.
+        string _builtCreationPath;
         readonly List<Column> _columns = new List<Column>();
 
         // Press / potential-drag state for the list.
@@ -144,6 +151,14 @@ namespace Yozolab.Tabstep
         string _renameText;
         bool _renameFocusPending;
 
+        // While naming a brand-new asset from Assets/Create/... this holds the request
+        // we drained from AssetCreationBridge. The asset does not exist on disk yet
+        // (Unity defers writing it until the inline rename commits), so the column
+        // view synthesises a phantom row for the rename overlay to sit on. Commit
+        // invokes the captured EndNameEditAction.Action (which writes the asset);
+        // Escape or focus loss invokes EndNameEditAction.Cancelled.
+        AssetCreationBridge.Request _creation;
+
         class Column
         {
             public string Label;
@@ -165,6 +180,7 @@ namespace Yozolab.Tabstep
 
         public void HandleEvents(Rect listRect, string folder, AssetSortKey key, bool descending, Host host)
         {
+            ConsumePendingCreation(folder, host);
             EnsureBuilt(folder, key, descending);
             var e = Event.current;
             var lay = Measure(listRect);
@@ -410,7 +426,11 @@ namespace Yozolab.Tabstep
             // Ping flash tint, under the icon/label so they stay readable.
             if (isPing) EditorGUI.DrawRect(r, new Color(PingColor.r, PingColor.g, PingColor.b, _pingAlpha * 0.5f));
 
-            var icon = AssetDatabase.GetCachedIcon(item.Path);
+            // A brand-new asset has no AssetDatabase entry yet; fall back to the
+            // preview icon Unity passed with BeginPreimportedNameEditing.
+            Texture icon = AssetDatabase.GetCachedIcon(item.Path);
+            if (icon == null && _creation != null && item.Path == _creation.PathName)
+                icon = _creation.Icon;
             var iconRect = new Rect(r.x + 4, r.y + (r.height - IconSize) / 2, IconSize, IconSize);
             if (icon != null) GUI.DrawTexture(iconRect, icon, ScaleMode.ScaleToFit);
 
@@ -542,6 +562,41 @@ namespace Yozolab.Tabstep
         }
 
         /// <summary>
+        /// Picks up a pending Assets/Create/... request and switches the column view
+        /// into "naming a new asset" mode. The request was deposited by the Harmony
+        /// patch in <see cref="ProjectBrowserPatcher"/>; the phantom row is folded
+        /// into the columns by <see cref="EnsureBuilt"/> on the next rebuild.
+        /// </summary>
+        void ConsumePendingCreation(string folder, Host host)
+        {
+            // An in-progress create still owns the rename overlay — leave it alone.
+            if (_creation != null) return;
+            if (host.TakePendingCreation == null) return;
+            var request = host.TakePendingCreation();
+            if (request == null) return;
+
+            // Discard a request meant for a folder we no longer show (the user
+            // navigated away between the Create click and this event pass): if we
+            // kept it, the phantom would never render and the user would be stuck
+            // with an invisible rename overlay running EndAction on focus loss.
+            if (string.IsNullOrEmpty(folder) || ParentFolder(request.PathName) != folder)
+            {
+                request.EndAction?.Cancelled(request.InstanceID, request.PathName, request.ResourceFile);
+                return;
+            }
+
+            // A user-driven rename in progress is dropped — the Create request wins,
+            // the same way the stock browser swaps overlays when Create arrives.
+            if (_renamePath != null) EndRename();
+
+            _creation = request;
+            _renamePath = request.PathName;
+            _renameText = Path.GetFileNameWithoutExtension(request.PathName);
+            _renameFocusPending = true;
+            host.Repaint?.Invoke();
+        }
+
+        /// <summary>
         /// Starts renaming the selected item — the active object when it is shown here,
         /// otherwise the first selected item in reading order. Returns false when nothing
         /// renameable is selected in this view.
@@ -607,12 +662,47 @@ namespace Yozolab.Tabstep
         {
             string path = _renamePath;
             string text = (_renameText ?? string.Empty).Trim();
+            var creation = _creation;
+            // Clear our rename state first so EndRename (called below) does not also
+            // try to cancel the creation we are about to commit.
+            _creation = null;
             EndRename();
             if (string.IsNullOrEmpty(path)) return;
 
+            // Naming a brand-new asset (Assets/Create/...) — hand the typed name to
+            // the captured EndNameEditAction so Unity's own creation pipeline runs.
+            if (creation != null)
+            {
+                string fallback = Path.GetFileNameWithoutExtension(creation.PathName);
+                if (string.IsNullOrEmpty(text)) text = fallback;
+                string parent = ParentFolder(creation.PathName);
+                string ext = Path.GetExtension(creation.PathName);
+                string finalPath = AssetDatabase.GenerateUniqueAssetPath(
+                    (parent.Length == 0 ? string.Empty : parent + "/") + text + ext);
+                try
+                {
+                    creation.EndAction.Action(creation.InstanceID, finalPath, creation.ResourceFile);
+                }
+                catch (Exception e)
+                {
+                    Debug.LogWarning($"Tabstep: could not create \"{finalPath}\": {e}");
+                }
+                // Most EndNameEditActions select the new asset themselves (via
+                // ProjectWindowUtil.ShowCreatedAsset); fall back here for the ones
+                // that do not, so the just-named asset is always highlighted.
+                var created = AssetDatabase.LoadMainAssetAtPath(finalPath);
+                if (created != null)
+                {
+                    Selection.activeObject = created;
+                    _selectionAnchor = finalPath;
+                }
+                ProjectVersion++; // the phantom is gone; the real asset (if created) takes its slot
+                return;
+            }
+
             bool isFolder = AssetDatabase.IsValidFolder(path);
-            string current = isFolder ? Path.GetFileName(path) : Path.GetFileNameWithoutExtension(path);
-            if (string.IsNullOrEmpty(text) || text == current) return;
+            string currentName = isFolder ? Path.GetFileName(path) : Path.GetFileNameWithoutExtension(path);
+            if (string.IsNullOrEmpty(text) || text == currentName) return;
 
             string error = AssetDatabase.RenameAsset(path, text); // keeps the extension itself
             if (!string.IsNullOrEmpty(error))
@@ -622,9 +712,9 @@ namespace Yozolab.Tabstep
             }
 
             // Reselect the asset at its new path so the selection follows the rename.
-            string parent = ParentFolder(path);
-            string ext = isFolder ? string.Empty : Path.GetExtension(path);
-            string newPath = (parent.Length == 0 ? string.Empty : parent + "/") + text + ext;
+            string renamedParent = ParentFolder(path);
+            string renamedExt = isFolder ? string.Empty : Path.GetExtension(path);
+            string newPath = (renamedParent.Length == 0 ? string.Empty : renamedParent + "/") + text + renamedExt;
             var obj = AssetDatabase.LoadMainAssetAtPath(newPath);
             if (obj != null) { Selection.activeObject = obj; _selectionAnchor = newPath; }
             // Force a rebuild for the new name without resetting the scroll (which MarkDirty,
@@ -636,6 +726,22 @@ namespace Yozolab.Tabstep
         /// <summary>Ends the rename without applying it and releases the text field focus.</summary>
         void EndRename()
         {
+            // If a brand-new asset was being named, tell Unity to discard the
+            // would-be creation (delete its temporary preview, free its instance id).
+            if (_creation != null)
+            {
+                var c = _creation;
+                _creation = null;
+                try
+                {
+                    c.EndAction?.Cancelled(c.InstanceID, c.PathName, c.ResourceFile);
+                }
+                catch (Exception e)
+                {
+                    Debug.LogWarning($"Tabstep: cancelling \"{c.PathName}\" threw: {e}");
+                }
+                ProjectVersion++; // drop the phantom from the columns
+            }
             _renamePath = null;
             _renameText = null;
             _renameFocusPending = false;
@@ -980,8 +1086,9 @@ namespace Yozolab.Tabstep
 
         void EnsureBuilt(string folder, AssetSortKey key, bool descending)
         {
+            string creationPath = CreationPathFor(folder);
             if (folder == _builtFolder && key == _builtKey && descending == _builtDescending &&
-                _builtVersion == ProjectVersion)
+                _builtVersion == ProjectVersion && creationPath == _builtCreationPath)
                 return;
 
             // Reset the scroll and range anchor when the shown folder changes.
@@ -996,6 +1103,7 @@ namespace Yozolab.Tabstep
             _builtKey = key;
             _builtDescending = descending;
             _builtVersion = ProjectVersion;
+            _builtCreationPath = creationPath;
             _columns.Clear();
             if (string.IsNullOrEmpty(folder)) return;
 
@@ -1015,6 +1123,27 @@ namespace Yozolab.Tabstep
                 col.Items.Add(item);
             }
 
+            // A new asset being named (Assets/Create/...) does not exist on disk yet,
+            // so EnumerateChildren skipped it. Add it as a phantom item under the
+            // matching label so the rename overlay has a row to sit on.
+            if (creationPath != null)
+            {
+                bool isFolder = CreationIsFolder(_creation);
+                string label = isFolder ? "Folders" : TypeLabelForExtension(creationPath);
+                if (!byLabel.TryGetValue(label, out var col))
+                {
+                    col = new Column { Label = label };
+                    byLabel[label] = col;
+                    _columns.Add(col);
+                }
+                var item = new Item
+                {
+                    Path = creationPath,
+                    Name = Path.GetFileNameWithoutExtension(creationPath),
+                };
+                col.Items.Add(item);
+            }
+
             // Folders column always first; the rest by type name (reversed when sorting by
             // Type descending). The chosen key then orders the items inside each column.
             _columns.Sort((a, b) =>
@@ -1026,6 +1155,54 @@ namespace Yozolab.Tabstep
             });
             foreach (var col in _columns)
                 col.Items.Sort((a, b) => CompareItems(a, b, key, descending));
+        }
+
+        /// <summary>
+        /// The new-asset path the in-flight creation request would put under
+        /// <paramref name="folder"/>, or null when there is no request or it belongs
+        /// to a different folder.
+        /// </summary>
+        string CreationPathFor(string folder)
+        {
+            if (_creation == null || string.IsNullOrEmpty(folder)) return null;
+            var path = _creation.PathName;
+            if (string.IsNullOrEmpty(path) || ParentFolder(path) != folder) return null;
+            return path;
+        }
+
+        /// <summary>True when the request is a folder create (no file extension).</summary>
+        static bool CreationIsFolder(AssetCreationBridge.Request r)
+        {
+            if (r == null) return false;
+            return string.IsNullOrEmpty(Path.GetExtension(r.PathName));
+        }
+
+        /// <summary>
+        /// Label for an asset that does not exist on disk yet, derived from the
+        /// file extension (so <see cref="TypeLabel"/>'s asset-database lookups,
+        /// which would fail, are bypassed).
+        /// </summary>
+        static string TypeLabelForExtension(string path)
+        {
+            var ext = Path.GetExtension(path);
+            if (string.IsNullOrEmpty(ext)) return "Other";
+            switch (ext.ToLowerInvariant())
+            {
+                case ".cs": return "Script";
+                case ".unity": return "Scene";
+                case ".prefab": return "Prefab";
+                case ".asset": return "ScriptableObject";
+                case ".mat": return "Material";
+                case ".shader": return "Shader";
+                case ".anim": return "AnimationClip";
+                case ".controller": return "AnimatorController";
+                case ".txt": return "Text";
+                case ".png":
+                case ".jpg":
+                case ".jpeg":
+                case ".tga": return "Texture";
+                default: return ext.TrimStart('.').ToUpperInvariant();
+            }
         }
 
         static int CompareItems(Item a, Item b, AssetSortKey key, bool descending)
