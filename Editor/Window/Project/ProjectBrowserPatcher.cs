@@ -192,10 +192,14 @@ namespace Yozolab.Tabstep
         {
             if (!BrowserOwners.TryGetValue(__instance, out var owner) || owner == null) return true;
             var window = owner as TabstepProjectWindow;
-            // The column view can only host a phantom row when the new asset lives in
-            // the active tab's folder. Tree-pane right-click creates that target a
-            // different folder run the stock flow unchanged.
-            if (window == null || !window.ShouldInterceptNewAssetRename(pathName)) return true;
+            if (window == null || !window.ShouldInterceptNewAssetRename()) return true;
+
+            // Drive the active tab to wherever Unity is about to write the asset
+            // (right-click on a subfolder, asset selected in a different folder, ...)
+            // so the column-view phantom has the right folder under it. Without this
+            // step the original ran and left a phantom in the (covered) browser that
+            // only surfaced when the user toggled the column view off.
+            window.EnsureTabShowsForCreate(pathName);
 
             AssetCreationBridge.Submit(owner, new AssetCreationBridge.Request
             {

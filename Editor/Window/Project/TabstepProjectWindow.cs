@@ -344,19 +344,35 @@ namespace Yozolab.Tabstep
 
         /// <summary>
         /// True while the active tab covers the embedded browser's list pane with the
-        /// column view AND the new asset's parent folder matches the tab — so the
-        /// phantom row has somewhere to land. Tree-pane creates that target a different
-        /// folder return false here and run the embedded browser's normal flow.
+        /// column view — the prefix on BeginPreimportedNameEditing should then route
+        /// the new-asset rename through the column view's overlay instead of leaving
+        /// the (hidden) browser overlay to drive it.
         /// </summary>
-        internal bool ShouldInterceptNewAssetRename(string newAssetPath)
+        internal bool ShouldInterceptNewAssetRename()
         {
             var tab = _session.ActiveTab;
             if (tab == null || tab.ViewMode != ItemViewMode.TypeColumns) return false;
-            if (_host == null || _host.IsSearching()) return false;
-            if (string.IsNullOrEmpty(newAssetPath) || string.IsNullOrEmpty(tab.CurrentPath)) return false;
+            return _host != null && !_host.IsSearching();
+        }
+
+        /// <summary>
+        /// Navigates the active tab into the folder Unity is about to create the new
+        /// asset under, when the column view is currently showing a different folder.
+        /// Without this, the column-view phantom would never render (its parent
+        /// mismatch guard discards the request) and the user would only see Unity's
+        /// own phantom row appear when they toggle back to the stock view.
+        /// </summary>
+        internal void EnsureTabShowsForCreate(string newAssetPath)
+        {
+            if (string.IsNullOrEmpty(newAssetPath)) return;
+            var tab = _session.ActiveTab;
+            if (tab == null) return;
             int slash = newAssetPath.LastIndexOf('/');
             string parent = slash <= 0 ? string.Empty : newAssetPath.Substring(0, slash);
-            return parent == tab.CurrentPath;
+            if (string.IsNullOrEmpty(parent) || parent == tab.CurrentPath) return;
+            if (!AssetDatabase.IsValidFolder(parent)) return;
+            tab.Navigate(parent);
+            _applyTabToBrowser = true;
         }
 
         void ShowPathBarContextMenu()

@@ -133,6 +133,22 @@ namespace Yozolab.Tabstep
         static readonly MethodInfo CreateAssetUtilityResetMethod = CreateAssetUtilityType?
             .GetMethod("Reset", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
 
+        // Direct field access for the CreateAssetUtility state. The properties are the
+        // documented surface, but a single failed Reset() reflection lookup in any
+        // Unity build leaves the utility populated forever and our polling re-feeds
+        // the same request to the column view on every tick. Clearing the fields
+        // by hand is the belt to Reset's suspenders.
+        static readonly FieldInfo CreateAssetUtilityInstanceIDField = CreateAssetUtilityType?
+            .GetField("m_InstanceID", BindingFlags.Instance | BindingFlags.NonPublic);
+        static readonly FieldInfo CreateAssetUtilityPathField = CreateAssetUtilityType?
+            .GetField("m_Path", BindingFlags.Instance | BindingFlags.NonPublic);
+        static readonly FieldInfo CreateAssetUtilityIconField = CreateAssetUtilityType?
+            .GetField("m_Icon", BindingFlags.Instance | BindingFlags.NonPublic);
+        static readonly FieldInfo CreateAssetUtilityResourceFileField = CreateAssetUtilityType?
+            .GetField("m_ResourceFile", BindingFlags.Instance | BindingFlags.NonPublic);
+        static readonly FieldInfo CreateAssetUtilityEndActionField = CreateAssetUtilityType?
+            .GetField("m_EndAction", BindingFlags.Instance | BindingFlags.NonPublic);
+
         // public RenameOverlay GetRenameOverlay() — on ObjectListArea. Needed so the
         // browser's now-orphan inline rename overlay (it kept renaming after we Reset
         // the create utility) gets dismissed; otherwise its hidden text field steals
@@ -533,7 +549,18 @@ namespace Yozolab.Tabstep
                 var listArea = ListAreaField.GetValue(_browser);
                 if (listArea == null) return;
                 var utility = ListAreaGetCreateAssetUtilityMethod.Invoke(listArea, null);
-                if (utility != null) CreateAssetUtilityResetMethod?.Invoke(utility, null);
+                if (utility != null)
+                {
+                    CreateAssetUtilityResetMethod?.Invoke(utility, null);
+                    // Wipe the fields directly too — the only thing the polling check
+                    // gates on is m_InstanceID != 0 and a non-empty m_Path, so the
+                    // create utility must look unambiguously empty after this call.
+                    CreateAssetUtilityInstanceIDField?.SetValue(utility, 0);
+                    CreateAssetUtilityPathField?.SetValue(utility, string.Empty);
+                    CreateAssetUtilityIconField?.SetValue(utility, null);
+                    CreateAssetUtilityResourceFileField?.SetValue(utility, string.Empty);
+                    CreateAssetUtilityEndActionField?.SetValue(utility, null);
+                }
                 if (ListAreaGetRenameOverlayMethod != null && RenameOverlayEndRenameMethod != null)
                 {
                     var overlay = ListAreaGetRenameOverlayMethod.Invoke(listArea, null);
@@ -556,30 +583,53 @@ namespace Yozolab.Tabstep
         public AssetCreationBridge.Request TakeBrowserCreateInProgress()
         {
             if (_browser == null || ListAreaField == null) return null;
-            if (ListAreaGetCreateAssetUtilityMethod == null || CreateAssetUtilityIsCreatingMethod == null) return null;
+            if (ListAreaGetCreateAssetUtilityMethod == null) return null;
             try
             {
                 var listArea = ListAreaField.GetValue(_browser);
                 if (listArea == null) return null;
                 var utility = ListAreaGetCreateAssetUtilityMethod.Invoke(listArea, null);
                 if (utility == null) return null;
-                if (!(bool)CreateAssetUtilityIsCreatingMethod.Invoke(utility, null)) return null;
+
+                // Read straight from the backing fields — properties have the same
+                // information and slightly different names across Unity versions
+                // ("folder" returning m_Path is the awkward example) so this path is
+                // both more robust and easier to keep clearing in lock-step.
+                int instanceID = CreateAssetUtilityInstanceIDField != null
+                    ? (int)CreateAssetUtilityInstanceIDField.GetValue(utility)
+                    : (CreateAssetUtilityInstanceIDProp != null
+                        ? (int)CreateAssetUtilityInstanceIDProp.GetValue(utility) : 0);
+                if (instanceID == 0) return null; // nothing in flight
+
+                string pathName = (CreateAssetUtilityPathField?.GetValue(utility) as string)
+                    ?? (CreateAssetUtilityFolderProp?.GetValue(utility) as string);
+                if (string.IsNullOrEmpty(pathName)) return null;
 
                 var request = new AssetCreationBridge.Request
                 {
-                    InstanceID = CreateAssetUtilityInstanceIDProp != null
-                        ? (int)CreateAssetUtilityInstanceIDProp.GetValue(utility) : 0,
-                    PathName = CreateAssetUtilityFolderProp?.GetValue(utility) as string,
-                    Icon = CreateAssetUtilityIconProp?.GetValue(utility) as Texture2D,
-                    ResourceFile = CreateAssetUtilityResourceFileProp?.GetValue(utility) as string,
-                    EndAction = CreateAssetUtilityEndActionProp?.GetValue(utility)
-                        as UnityEditor.ProjectWindowCallback.EndNameEditAction,
+                    InstanceID = instanceID,
+                    PathName = pathName,
+                    Icon = (CreateAssetUtilityIconField?.GetValue(utility) as Texture2D)
+                        ?? (CreateAssetUtilityIconProp?.GetValue(utility) as Texture2D),
+                    ResourceFile = (CreateAssetUtilityResourceFileField?.GetValue(utility) as string)
+                        ?? (CreateAssetUtilityResourceFileProp?.GetValue(utility) as string),
+                    EndAction = (CreateAssetUtilityEndActionField?.GetValue(utility)
+                        as UnityEditor.ProjectWindowCallback.EndNameEditAction)
+                        ?? (CreateAssetUtilityEndActionProp?.GetValue(utility)
+                            as UnityEditor.ProjectWindowCallback.EndNameEditAction),
                 };
-                if (string.IsNullOrEmpty(request.PathName)) return null;
 
-                // Clear the browser's hold on the create — the post-handle check that
-                // would otherwise call EndAction.Cancelled gates on IsCreatingNewAsset.
+                // Clear the browser's hold on the create — the post-handle check
+                // gates on IsCreatingNewAsset(), which reads m_InstanceID. Reset()
+                // first (Unity's own zeroing path), then wipe each field by hand so
+                // a missing Reset method binding cannot leave a partially-populated
+                // utility that the next poll would re-feed to the column view.
                 CreateAssetUtilityResetMethod?.Invoke(utility, null);
+                CreateAssetUtilityInstanceIDField?.SetValue(utility, 0);
+                CreateAssetUtilityPathField?.SetValue(utility, string.Empty);
+                CreateAssetUtilityIconField?.SetValue(utility, null);
+                CreateAssetUtilityResourceFileField?.SetValue(utility, string.Empty);
+                CreateAssetUtilityEndActionField?.SetValue(utility, null);
                 // Dismiss the now-orphan rename overlay so its hidden text field stops
                 // grabbing focus away from the column view's overlay.
                 if (ListAreaGetRenameOverlayMethod != null && RenameOverlayEndRenameMethod != null)
