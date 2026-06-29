@@ -828,16 +828,16 @@ namespace Yozolab.Tabstep
                     // placeholder name (e.g. "New Folder"); just rename it in place.
                     if (text != Path.GetFileNameWithoutExtension(creation.PathName))
                     {
-                        var error = AssetDatabase.RenameAsset(creation.PathName, text);
-                        if (!string.IsNullOrEmpty(error))
-                            Debug.LogWarning($"Tabstep: could not rename \"{creation.PathName}\": {error}");
+                        var renameError = AssetDatabase.RenameAsset(creation.PathName, text);
+                        if (!string.IsNullOrEmpty(renameError))
+                            Debug.LogWarning($"Tabstep: could not rename \"{creation.PathName}\": {renameError}");
                     }
-                    string newPath = (parent.Length == 0 ? string.Empty : parent + "/") + text + ext;
-                    var asset = AssetDatabase.LoadMainAssetAtPath(newPath);
+                    string createdPath = (parent.Length == 0 ? string.Empty : parent + "/") + text + ext;
+                    var asset = AssetDatabase.LoadMainAssetAtPath(createdPath);
                     if (asset != null)
                     {
                         Selection.activeObject = asset;
-                        _selectionAnchor = newPath;
+                        _selectionAnchor = createdPath;
                     }
                 }
                 ProjectVersion++; // the phantom is gone; the real asset (if created) takes its slot
