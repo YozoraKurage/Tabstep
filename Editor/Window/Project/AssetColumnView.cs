@@ -81,6 +81,20 @@ namespace Yozolab.Tabstep
             public Action<string> OpenFolderInNewTab;  // middle-click a folder column entry
             public Action Repaint;
             public Action MarkBrowserInteracted;        // so the Assets/Create menu targets our folder
+            // A freshly invoked Assets/Create/... request to drive in the column view
+            // (captured by ProjectBrowserPatcher so the embedded browser's own — and
+            // invisible — rename overlay never runs). Null when nothing is pending.
+            public Func<AssetCreationBridge.Request> TakePendingCreation;
+            // Fallback used when the Harmony prefix did not install (no Harmony, or a
+            // future Unity rename of the entry point): reads any create the embedded
+            // browser already started out of its ObjectListArea and tears that state
+            // down so only the column view drives the rename.
+            public Func<AssetCreationBridge.Request> PollBrowserCreate;
+            // Forcefully clears every backing store of the in-flight create — the
+            // bridge entry, the embedded browser's CreateAssetUtility and its rename
+            // overlay. Called after each commit/cancel so a stale request cannot
+            // re-arm the phantom on the next click.
+            public Action DiscardPendingCreation;
         }
 
         // ---- layout constants ----
@@ -104,6 +118,9 @@ namespace Yozolab.Tabstep
         AssetSortKey _builtKey;
         bool _builtDescending;
         int _builtVersion = -1;
+        // The in-flight Assets/Create/... path baked into the last build, so the
+        // phantom row appears/disappears when the request arrives or completes.
+        string _builtCreationPath;
         readonly List<Column> _columns = new List<Column>();
 
         // Press / potential-drag state for the list.
@@ -144,6 +161,26 @@ namespace Yozolab.Tabstep
         string _renameText;
         bool _renameFocusPending;
 
+        // While naming a brand-new asset from Assets/Create/... this holds the request
+        // we drained from AssetCreationBridge. The asset does not exist on disk yet
+        // (Unity defers writing it until the inline rename commits), so the column
+        // view synthesises a phantom row for the rename overlay to sit on. Commit
+        // invokes the captured EndNameEditAction.Action (which writes the asset);
+        // Escape or focus loss invokes EndNameEditAction.Cancelled.
+        AssetCreationBridge.Request _creation;
+        // Latest Host passed into HandleEvents — kept so CommitRename / EndRename can
+        // reach back into the bridge and the embedded browser to discard any stale
+        // pending state without changing every internal call site to take a Host.
+        Host _lastHost;
+        // The last create request we drained, retained until a different request
+        // arrives. Acts as a single-frame debounce against the runaway loop where
+        // a stale browser CreateAssetUtility (its Reset reflection silently missed
+        // in some Unity build) kept re-feeding the same request to ConsumePendingCreation,
+        // re-arming the rename overlay and re-firing CommitRename — which in turn
+        // re-created the asset over and over.
+        int _lastConsumedInstanceID;
+        string _lastConsumedPathName;
+
         class Column
         {
             public string Label;
@@ -165,6 +202,15 @@ namespace Yozolab.Tabstep
 
         public void HandleEvents(Rect listRect, string folder, AssetSortKey key, bool descending, Host host)
         {
+            _lastHost = host;
+            // A creation whose folder no longer matches the shown folder is stale —
+            // the user navigated mid-name-input. Tear it down before anything else
+            // so the next click is a normal click, not an auto-commit of the stale
+            // request that would create the asset somewhere the user isn't looking.
+            if (_creation != null && !string.IsNullOrEmpty(folder) &&
+                ParentFolder(_creation.PathName) != folder)
+                EndRename();
+            ConsumePendingCreation(folder, host);
             EnsureBuilt(folder, key, descending);
             var e = Event.current;
             var lay = Measure(listRect);
@@ -230,23 +276,44 @@ namespace Yozolab.Tabstep
                     // switches the Inspector to the wrong object. Swallow the drag here so only
                     // real drop targets elsewhere (scene, object fields, the folder tree) act.
                     //
-                    // Opt-in: dropping onto a folder entry moves the dragged assets into it.
+                    // Drops over a specific folder entry (opt-in) target that folder; otherwise
+                    // the shown folder itself, the natural target after a spring-load brought us
+                    // to a sibling tab. Scene GameObjects in the drag become brand-new prefabs
+                    // there (Copy mode), matching the stock browser's Hierarchy → Project drop.
                     if (listRect.Contains(e.mousePosition))
                     {
-                        var dropFolder = TabstepSettings.ColumnViewFolderDrop
-                            ? FolderDropTarget(e.mousePosition, lay) : null;
-                        if (dropFolder != null)
+                        string hoveredFolder = null;
+                        if (TabstepSettings.ColumnViewFolderDrop)
                         {
-                            DragAndDrop.visualMode = DragAndDropVisualMode.Move;
+                            var hit = HitTest(e.mousePosition, lay, out bool isFolder);
+                            if (isFolder) hoveredFolder = hit;
+                        }
+                        string dropTo = hoveredFolder ?? folder;
+                        var sceneRoots = CollectSceneRootsForPrefab();
+                        var draggedPaths = CollectDraggedAssetPaths();
+                        bool willCreatePrefabs = sceneRoots.Count > 0
+                            && !string.IsNullOrEmpty(dropTo)
+                            && AssetDatabase.IsValidFolder(dropTo);
+                        bool willMoveAssets = !willCreatePrefabs
+                            && HasMoveableAssetInto(dropTo, draggedPaths);
+                        if (willCreatePrefabs || willMoveAssets)
+                        {
+                            DragAndDrop.visualMode = willCreatePrefabs
+                                ? DragAndDropVisualMode.Copy
+                                : DragAndDropVisualMode.Move;
                             if (e.type == EventType.DragPerform)
                             {
                                 DragAndDrop.AcceptDrag();
-                                MoveAssetsInto(dropFolder);
+                                if (willCreatePrefabs) CreatePrefabsInto(dropTo, sceneRoots);
+                                else MoveAssetsInto(dropTo, draggedPaths);
                                 _dropFolder = null;
                             }
                             else
                             {
-                                _dropFolder = dropFolder; // highlight it while hovering
+                                // Highlight only the explicit folder row, never the bare
+                                // viewport — the latter would feel like the whole pane is
+                                // selected as a target.
+                                _dropFolder = hoveredFolder;
                             }
                         }
                         else
@@ -325,6 +392,12 @@ namespace Yozolab.Tabstep
                     Selection.activeObject = AssetDatabase.LoadMainAssetAtPath(path);
                     _selectionAnchor = path;
                 }
+                // Empty-area right-click intentionally leaves Selection untouched —
+                // ProjectBrowserPatcher's GetActiveFolderPath patch pins the create
+                // destination to the active tab's folder directly, so anchoring
+                // Selection here is unnecessary and would cause the browser's own
+                // OnSelectionChange handler to push the folder into m_LastFolders
+                // and fire extra cascading state changes.
                 host.MarkBrowserInteracted?.Invoke();
                 EditorUtility.DisplayPopupMenu(new Rect(e.mousePosition.x, e.mousePosition.y, 0, 0), "Assets/", null);
                 e.Use();
@@ -410,7 +483,11 @@ namespace Yozolab.Tabstep
             // Ping flash tint, under the icon/label so they stay readable.
             if (isPing) EditorGUI.DrawRect(r, new Color(PingColor.r, PingColor.g, PingColor.b, _pingAlpha * 0.5f));
 
-            var icon = AssetDatabase.GetCachedIcon(item.Path);
+            // A brand-new asset has no AssetDatabase entry yet; fall back to the
+            // preview icon Unity passed with BeginPreimportedNameEditing.
+            Texture icon = AssetDatabase.GetCachedIcon(item.Path);
+            if (icon == null && _creation != null && item.Path == _creation.PathName)
+                icon = _creation.Icon;
             var iconRect = new Rect(r.x + 4, r.y + (r.height - IconSize) / 2, IconSize, IconSize);
             if (icon != null) GUI.DrawTexture(iconRect, icon, ScaleMode.ScaleToFit);
 
@@ -495,7 +572,99 @@ namespace Yozolab.Tabstep
             {
                 DeleteSelection(host);
                 e.Use();
+                return;
             }
+
+            // Arrow-key selection — Up/Down walk the current type column, Left/Right
+            // step across to the previous/next column. Shift extends the selection
+            // from the anchor, matching plain/Shift-click. Always consume them so the
+            // hidden browser underneath never also acts on the same key.
+            if (e.keyCode == KeyCode.UpArrow || e.keyCode == KeyCode.DownArrow ||
+                e.keyCode == KeyCode.LeftArrow || e.keyCode == KeyCode.RightArrow ||
+                e.keyCode == KeyCode.Home || e.keyCode == KeyCode.End)
+            {
+                if (MoveSelection(e, lay, host)) e.Use();
+            }
+        }
+
+        // ---- arrow-key selection -----------------------------------------------
+
+        /// <summary>
+        /// Moves the active selection one step in the direction of <paramref name="e"/>,
+        /// or jumps to the first/last item on Home/End. Returns false when there is
+        /// nothing to step through (empty folder) so the key is left for other handlers.
+        /// </summary>
+        bool MoveSelection(Event e, Layout lay, Host host)
+        {
+            if (_columns.Count == 0) return false;
+
+            // Where the cursor currently sits in the grid. With no selection shown
+            // in this view (nothing active, or active item lives outside the
+            // columns) the first arrow press just lands on (0,0), like the stock
+            // browser's first Down/Right into an unfocused list.
+            int ci = -1, ii = -1;
+            var activePath = AssetDatabase.GetAssetPath(Selection.activeObject);
+            bool hasAnchor = !string.IsNullOrEmpty(activePath) && FindItem(activePath, out ci, out ii);
+            int newCi, newIi;
+            if (!hasAnchor)
+            {
+                // No prior selection here — any arrow lands on the first item.
+                newCi = 0;
+                newIi = 0;
+            }
+            else
+            {
+                newCi = ci;
+                newIi = ii;
+                switch (e.keyCode)
+                {
+                    case KeyCode.UpArrow:
+                        newIi = Mathf.Max(0, ii - 1);
+                        break;
+                    case KeyCode.DownArrow:
+                        newIi = Mathf.Min(_columns[ci].Items.Count - 1, ii + 1);
+                        break;
+                    case KeyCode.LeftArrow:
+                        newCi = Mathf.Max(0, ci - 1);
+                        // The previous column may be shorter — clamp so we land on a real row.
+                        newIi = Mathf.Min(ii, _columns[newCi].Items.Count - 1);
+                        break;
+                    case KeyCode.RightArrow:
+                        newCi = Mathf.Min(_columns.Count - 1, ci + 1);
+                        newIi = Mathf.Min(ii, _columns[newCi].Items.Count - 1);
+                        break;
+                    case KeyCode.Home:
+                        newCi = 0;
+                        newIi = 0;
+                        break;
+                    case KeyCode.End:
+                        newCi = _columns.Count - 1;
+                        newIi = _columns[newCi].Items.Count - 1;
+                        break;
+                }
+            }
+            if (newCi == ci && newIi == ii) return true; // already there — consume but no-op
+
+            string newPath = _columns[newCi].Items[newIi].Path;
+            var obj = AssetDatabase.LoadMainAssetAtPath(newPath);
+            if (obj == null) return true; // phantom row or missing asset — swallow but no selection change
+
+            if (e.shift)
+            {
+                // Extend from the anchor (set on the last plain selection) to the new
+                // item, matching Shift+click. SelectRange leaves the anchor in place
+                // so the next Shift+arrow stretches further in either direction.
+                SelectRange(newPath, additive: false);
+                Selection.activeObject = obj;
+            }
+            else
+            {
+                Selection.activeObject = obj;
+                _selectionAnchor = newPath;
+            }
+            ScrollItemIntoView(newCi, newIi, lay);
+            host.Repaint?.Invoke();
+            return true;
         }
 
         /// <summary>
@@ -542,6 +711,55 @@ namespace Yozolab.Tabstep
         }
 
         /// <summary>
+        /// Picks up a pending Assets/Create/... request and switches the column view
+        /// into "naming a new asset" mode. The request was deposited by the Harmony
+        /// patch in <see cref="ProjectBrowserPatcher"/>; the phantom row is folded
+        /// into the columns by <see cref="EnsureBuilt"/> on the next rebuild.
+        /// </summary>
+        void ConsumePendingCreation(string folder, Host host)
+        {
+            // An in-progress create still owns the rename overlay — leave it alone.
+            if (_creation != null) return;
+            var request = host.TakePendingCreation?.Invoke()
+                ?? host.PollBrowserCreate?.Invoke();
+            if (request == null) return;
+
+            // Defend against the runaway loop: if this request is the same (id +
+            // path) one we just consumed, swallow it. Some Unity builds keep
+            // CreateAssetUtility populated even after our Reset reflection ran,
+            // so polling would otherwise re-arm the rename every tick and the
+            // MouseDown auto-commit would re-create the folder forever.
+            if (request.InstanceID == _lastConsumedInstanceID &&
+                request.PathName == _lastConsumedPathName)
+            {
+                host.DiscardPendingCreation?.Invoke();
+                return;
+            }
+
+            // Discard a request meant for a folder we no longer show (the user
+            // navigated away between the Create click and this event pass): if we
+            // kept it, the phantom would never render and the user would be stuck
+            // with an invisible rename overlay running EndAction on focus loss.
+            if (string.IsNullOrEmpty(folder) || ParentFolder(request.PathName) != folder)
+            {
+                request.EndAction?.Cancelled(request.InstanceID, request.PathName, request.ResourceFile);
+                return;
+            }
+
+            // A user-driven rename in progress is dropped — the Create request wins,
+            // the same way the stock browser swaps overlays when Create arrives.
+            if (_renamePath != null) EndRename();
+
+            _creation = request;
+            _renamePath = request.PathName;
+            _renameText = Path.GetFileNameWithoutExtension(request.PathName);
+            _renameFocusPending = true;
+            _lastConsumedInstanceID = request.InstanceID;
+            _lastConsumedPathName = request.PathName;
+            host.Repaint?.Invoke();
+        }
+
+        /// <summary>
         /// Starts renaming the selected item — the active object when it is shown here,
         /// otherwise the first selected item in reading order. Returns false when nothing
         /// renameable is selected in this view.
@@ -578,6 +796,11 @@ namespace Yozolab.Tabstep
         {
             if (!FindItem(_renamePath, out int ci, out int ii)) { EndRename(); return; }
 
+            // First draw of a new rename — make sure the target row is on screen
+            // (Assets/Create/... routes here without going through HandleKeyDown's
+            // own scroll-into-view that F2 uses).
+            if (_renameFocusPending) ScrollItemIntoView(ci, ii, lay);
+
             float colX = lay.Viewport.x + Padding + ci * (ColumnWidth + ColumnGap) - _scroll.x;
             float y = lay.Viewport.y + HeaderHeight + Padding + ii * RowHeight - _scroll.y;
             var rowRect = new Rect(colX, y, ColumnWidth, RowHeight);
@@ -607,12 +830,77 @@ namespace Yozolab.Tabstep
         {
             string path = _renamePath;
             string text = (_renameText ?? string.Empty).Trim();
+            var creation = _creation;
+            // Clear our rename state first so EndRename (called below) does not also
+            // try to cancel the creation we are about to commit.
+            _creation = null;
             EndRename();
             if (string.IsNullOrEmpty(path)) return;
 
+            // Naming a brand-new asset (Assets/Create/...) — hand the typed name to
+            // the captured EndNameEditAction so Unity's own creation pipeline runs.
+            // Folder-create takes the same code path with EndAction == null (Unity's
+            // ProjectWindowUtil.CreateFolder writes the folder up front and uses the
+            // rename overlay purely for the name) — fall back to AssetDatabase.RenameAsset.
+            if (creation != null)
+            {
+                string fallback = Path.GetFileNameWithoutExtension(creation.PathName);
+                if (string.IsNullOrEmpty(text)) text = fallback;
+                string parent = ParentFolder(creation.PathName);
+                string ext = Path.GetExtension(creation.PathName);
+                if (creation.EndAction != null)
+                {
+                    string finalPath = AssetDatabase.GenerateUniqueAssetPath(
+                        (parent.Length == 0 ? string.Empty : parent + "/") + text + ext);
+                    try
+                    {
+                        creation.EndAction.Action(creation.InstanceID, finalPath, creation.ResourceFile);
+                    }
+                    catch (Exception e)
+                    {
+                        Debug.LogWarning($"Tabstep: could not create \"{finalPath}\": {e}");
+                    }
+                    var created = AssetDatabase.LoadMainAssetAtPath(finalPath);
+                    if (created != null)
+                    {
+                        Selection.activeObject = created;
+                        _selectionAnchor = finalPath;
+                    }
+                }
+                else
+                {
+                    // EndAction-less create: the asset is already on disk under the
+                    // placeholder name (e.g. "New Folder"); just rename it in place.
+                    if (text != Path.GetFileNameWithoutExtension(creation.PathName))
+                    {
+                        var renameError = AssetDatabase.RenameAsset(creation.PathName, text);
+                        if (!string.IsNullOrEmpty(renameError))
+                            Debug.LogWarning($"Tabstep: could not rename \"{creation.PathName}\": {renameError}");
+                    }
+                    string createdPath = (parent.Length == 0 ? string.Empty : parent + "/") + text + ext;
+                    var asset = AssetDatabase.LoadMainAssetAtPath(createdPath);
+                    if (asset != null)
+                    {
+                        Selection.activeObject = asset;
+                        _selectionAnchor = createdPath;
+                    }
+                }
+                // Wipe every backing store of the in-flight create — the bridge entry
+                // (in case Unity re-fired BeginPreimportedNameEditing during the
+                // EndAction itself) and the browser's CreateAssetUtility. Without this,
+                // the next MouseDown drains the leftover request, re-arms _renamePath
+                // and auto-commits the SAME placeholder yet again on the click — which
+                // is exactly the "asset keeps being created on every click after
+                // navigating away" loop reported on 2026-06-28.
+                _lastHost.DiscardPendingCreation?.Invoke();
+                _lastHost.Repaint?.Invoke();
+                ProjectVersion++; // the phantom is gone; the real asset (if created) takes its slot
+                return;
+            }
+
             bool isFolder = AssetDatabase.IsValidFolder(path);
-            string current = isFolder ? Path.GetFileName(path) : Path.GetFileNameWithoutExtension(path);
-            if (string.IsNullOrEmpty(text) || text == current) return;
+            string currentName = isFolder ? Path.GetFileName(path) : Path.GetFileNameWithoutExtension(path);
+            if (string.IsNullOrEmpty(text) || text == currentName) return;
 
             string error = AssetDatabase.RenameAsset(path, text); // keeps the extension itself
             if (!string.IsNullOrEmpty(error))
@@ -622,9 +910,9 @@ namespace Yozolab.Tabstep
             }
 
             // Reselect the asset at its new path so the selection follows the rename.
-            string parent = ParentFolder(path);
-            string ext = isFolder ? string.Empty : Path.GetExtension(path);
-            string newPath = (parent.Length == 0 ? string.Empty : parent + "/") + text + ext;
+            string renamedParent = ParentFolder(path);
+            string renamedExt = isFolder ? string.Empty : Path.GetExtension(path);
+            string newPath = (renamedParent.Length == 0 ? string.Empty : renamedParent + "/") + text + renamedExt;
             var obj = AssetDatabase.LoadMainAssetAtPath(newPath);
             if (obj != null) { Selection.activeObject = obj; _selectionAnchor = newPath; }
             // Force a rebuild for the new name without resetting the scroll (which MarkDirty,
@@ -636,10 +924,35 @@ namespace Yozolab.Tabstep
         /// <summary>Ends the rename without applying it and releases the text field focus.</summary>
         void EndRename()
         {
+            // If a brand-new asset was being named, tell Unity to discard the
+            // would-be creation (delete its temporary preview, free its instance id)
+            // and also wipe the bridge / browser create state so the cancelled
+            // request cannot be re-drained on the next click.
+            if (_creation != null)
+            {
+                var c = _creation;
+                _creation = null;
+                try
+                {
+                    c.EndAction?.Cancelled(c.InstanceID, c.PathName, c.ResourceFile);
+                }
+                catch (Exception e)
+                {
+                    Debug.LogWarning($"Tabstep: cancelling \"{c.PathName}\" threw: {e}");
+                }
+                _lastHost.DiscardPendingCreation?.Invoke();
+                ProjectVersion++; // drop the phantom from the columns
+            }
             _renamePath = null;
             _renameText = null;
             _renameFocusPending = false;
             if (GUI.GetNameOfFocusedControl() == RenameControlName) GUI.FocusControl(null);
+            // IMGUI keeps `editingTextField` set after the text field's control id
+            // is gone; if we leave it, HandleKeyDown's "leave keys to a text field"
+            // early-out swallows every Up/Down/Left/Right until the user clicks
+            // somewhere. Clear it explicitly so arrow navigation resumes the moment
+            // the rename ends.
+            EditorGUIUtility.editingTextField = false;
         }
 
         // ---- geometry ------------------------------------------------------------
@@ -928,27 +1241,29 @@ namespace Yozolab.Tabstep
         }
 
         /// <summary>
-        /// The folder under <paramref name="mouse"/> that the current drag could move into,
-        /// or null when the cursor isn't over a folder or nothing movable is being dragged.
+        /// True when at least one path in <paramref name="paths"/> would actually move into
+        /// <paramref name="folder"/> — i.e. it exists outside the folder and is not the
+        /// folder itself. Used so the cursor only shows "Move" while a real drop would
+        /// happen; an empty viewport drop and a same-folder drop both leave it as None.
         /// </summary>
-        string FolderDropTarget(Vector2 mouse, Layout lay)
+        static bool HasMoveableAssetInto(string folder, List<string> paths)
         {
-            var path = HitTest(mouse, lay, out bool isFolder);
-            if (!isFolder || path == null) return null;
-            var paths = DragAndDrop.paths;
-            if (paths == null || paths.Length == 0) return null;
-            // At least one dragged asset must not already live in the target folder.
-            foreach (var p in paths)
-                if (!string.IsNullOrEmpty(p) && ParentFolder(p) != path && p != path)
-                    return path;
-            return null;
+            if (string.IsNullOrEmpty(folder) || paths == null || paths.Count == 0) return false;
+            foreach (var path in paths)
+            {
+                if (string.IsNullOrEmpty(path)) continue;
+                if (path == folder || ParentFolder(path) == folder) continue;
+                if (AssetDatabase.IsValidFolder(path) &&
+                    folder.StartsWith(path + "/", StringComparison.Ordinal)) continue;
+                return true;
+            }
+            return false;
         }
 
-        /// <summary>Moves the dragged assets into <paramref name="folder"/>, skipping no-ops.</summary>
-        static void MoveAssetsInto(string folder)
+        /// <summary>Moves <paramref name="paths"/> into <paramref name="folder"/>, skipping no-ops.</summary>
+        static void MoveAssetsInto(string folder, List<string> paths)
         {
-            var paths = DragAndDrop.paths;
-            if (paths == null || paths.Length == 0) return;
+            if (paths == null || paths.Count == 0) return;
             AssetDatabase.StartAssetEditing();
             try
             {
@@ -970,6 +1285,79 @@ namespace Yozolab.Tabstep
             }
         }
 
+        /// <summary>
+        /// Asset paths of the current drag, unioned from <see cref="DragAndDrop.paths"/>
+        /// and <see cref="DragAndDrop.objectReferences"/> — the stock browser's tree pane
+        /// only populates the latter, so reading just paths missed tree drags.
+        /// </summary>
+        static List<string> CollectDraggedAssetPaths()
+        {
+            var seen = new HashSet<string>(StringComparer.Ordinal);
+            var result = new List<string>();
+            foreach (var raw in DragAndDrop.paths)
+            {
+                if (string.IsNullOrEmpty(raw) || !seen.Add(raw)) continue;
+                result.Add(raw);
+            }
+            foreach (var obj in DragAndDrop.objectReferences)
+            {
+                if (obj == null) continue;
+                var path = AssetDatabase.GetAssetPath(obj);
+                if (string.IsNullOrEmpty(path) || !seen.Add(path)) continue;
+                result.Add(path);
+            }
+            return result;
+        }
+
+        /// <summary>
+        /// Non-persistent <see cref="GameObject"/>s in the drag — scene roots eligible
+        /// to be saved out as brand-new prefab assets. Returns an empty list when the
+        /// drag carries only project assets.
+        /// </summary>
+        static List<GameObject> CollectSceneRootsForPrefab()
+        {
+            var result = new List<GameObject>();
+            foreach (var obj in DragAndDrop.objectReferences)
+            {
+                if (obj is GameObject go && !EditorUtility.IsPersistent(go))
+                    result.Add(go);
+            }
+            return result;
+        }
+
+        /// <summary>
+        /// Saves each <paramref name="sceneRoots"/> GameObject as a fresh prefab under
+        /// <paramref name="folder"/> and reconnects the scene instance to it — what the
+        /// stock browser does for a Hierarchy → Project drop.
+        /// </summary>
+        static void CreatePrefabsInto(string folder, List<GameObject> sceneRoots)
+        {
+            if (string.IsNullOrEmpty(folder) || !AssetDatabase.IsValidFolder(folder)) return;
+            AssetDatabase.StartAssetEditing();
+            try
+            {
+                foreach (var go in sceneRoots)
+                {
+                    if (go == null) continue;
+                    string baseName = string.IsNullOrEmpty(go.name) ? "GameObject" : go.name;
+                    string dest = AssetDatabase.GenerateUniqueAssetPath(folder + "/" + baseName + ".prefab");
+                    try
+                    {
+                        PrefabUtility.SaveAsPrefabAssetAndConnect(go, dest, InteractionMode.UserAction);
+                    }
+                    catch (Exception e)
+                    {
+                        Debug.LogWarning($"Tabstep: could not save \"{go.name}\" as a prefab at \"{dest}\": {e}");
+                    }
+                }
+            }
+            finally
+            {
+                AssetDatabase.StopAssetEditing();
+                AssetDatabase.Refresh();
+            }
+        }
+
         static string ParentFolder(string path)
         {
             int slash = path.LastIndexOf('/');
@@ -980,8 +1368,9 @@ namespace Yozolab.Tabstep
 
         void EnsureBuilt(string folder, AssetSortKey key, bool descending)
         {
+            string creationPath = CreationPathFor(folder);
             if (folder == _builtFolder && key == _builtKey && descending == _builtDescending &&
-                _builtVersion == ProjectVersion)
+                _builtVersion == ProjectVersion && creationPath == _builtCreationPath)
                 return;
 
             // Reset the scroll and range anchor when the shown folder changes.
@@ -996,6 +1385,7 @@ namespace Yozolab.Tabstep
             _builtKey = key;
             _builtDescending = descending;
             _builtVersion = ProjectVersion;
+            _builtCreationPath = creationPath;
             _columns.Clear();
             if (string.IsNullOrEmpty(folder)) return;
 
@@ -1015,6 +1405,29 @@ namespace Yozolab.Tabstep
                 col.Items.Add(item);
             }
 
+            // A new asset being named (Assets/Create/...) might not exist on disk yet
+            // (preimported types like scripts and ScriptableObjects) — synthesise a
+            // phantom row so the rename overlay has somewhere to sit. Folders, by
+            // contrast, are written before the rename starts and are already in the
+            // enumerated set above; adding a phantom would just duplicate the row.
+            if (creationPath != null && AssetDatabase.LoadMainAssetAtPath(creationPath) == null)
+            {
+                bool isFolder = CreationIsFolder(_creation);
+                string label = isFolder ? "Folders" : TypeLabelForExtension(creationPath);
+                if (!byLabel.TryGetValue(label, out var col))
+                {
+                    col = new Column { Label = label };
+                    byLabel[label] = col;
+                    _columns.Add(col);
+                }
+                var item = new Item
+                {
+                    Path = creationPath,
+                    Name = Path.GetFileNameWithoutExtension(creationPath),
+                };
+                col.Items.Add(item);
+            }
+
             // Folders column always first; the rest by type name (reversed when sorting by
             // Type descending). The chosen key then orders the items inside each column.
             _columns.Sort((a, b) =>
@@ -1026,6 +1439,54 @@ namespace Yozolab.Tabstep
             });
             foreach (var col in _columns)
                 col.Items.Sort((a, b) => CompareItems(a, b, key, descending));
+        }
+
+        /// <summary>
+        /// The new-asset path the in-flight creation request would put under
+        /// <paramref name="folder"/>, or null when there is no request or it belongs
+        /// to a different folder.
+        /// </summary>
+        string CreationPathFor(string folder)
+        {
+            if (_creation == null || string.IsNullOrEmpty(folder)) return null;
+            var path = _creation.PathName;
+            if (string.IsNullOrEmpty(path) || ParentFolder(path) != folder) return null;
+            return path;
+        }
+
+        /// <summary>True when the request is a folder create (no file extension).</summary>
+        static bool CreationIsFolder(AssetCreationBridge.Request r)
+        {
+            if (r == null) return false;
+            return string.IsNullOrEmpty(Path.GetExtension(r.PathName));
+        }
+
+        /// <summary>
+        /// Label for an asset that does not exist on disk yet, derived from the
+        /// file extension (so <see cref="TypeLabel"/>'s asset-database lookups,
+        /// which would fail, are bypassed).
+        /// </summary>
+        static string TypeLabelForExtension(string path)
+        {
+            var ext = Path.GetExtension(path);
+            if (string.IsNullOrEmpty(ext)) return "Other";
+            switch (ext.ToLowerInvariant())
+            {
+                case ".cs": return "Script";
+                case ".unity": return "Scene";
+                case ".prefab": return "Prefab";
+                case ".asset": return "ScriptableObject";
+                case ".mat": return "Material";
+                case ".shader": return "Shader";
+                case ".anim": return "AnimationClip";
+                case ".controller": return "AnimatorController";
+                case ".txt": return "Text";
+                case ".png":
+                case ".jpg":
+                case ".jpeg":
+                case ".tga": return "Texture";
+                default: return ext.TrimStart('.').ToUpperInvariant();
+            }
         }
 
         static int CompareItems(Item a, Item b, AssetSortKey key, bool descending)

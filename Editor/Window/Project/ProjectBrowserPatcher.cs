@@ -35,6 +35,10 @@ namespace Yozolab.Tabstep
             ProjectBrowserHost.BrowserType?.GetField("m_ListHeaderRect", InstanceFlags);
 
         static readonly HashSet<object> HostedBrowsers = new HashSet<object>();
+        // browser -> owning Tabstep window. Lets the BeginPreimportedNameEditing
+        // patch find which window's column view should drive the new asset rename.
+        static readonly Dictionary<object, EditorWindow> BrowserOwners =
+            new Dictionary<object, EditorWindow>();
         static bool _initialized;
         static bool _active;
 
@@ -48,15 +52,19 @@ namespace Yozolab.Tabstep
             }
         }
 
-        public static void Register(object browser)
+        public static void Register(object browser, EditorWindow owner)
         {
             Initialize();
-            if (browser != null) HostedBrowsers.Add(browser);
+            if (browser == null) return;
+            HostedBrowsers.Add(browser);
+            if (owner != null) BrowserOwners[browser] = owner;
         }
 
         public static void Unregister(object browser)
         {
-            if (browser != null) HostedBrowsers.Remove(browser);
+            if (browser == null) return;
+            HostedBrowsers.Remove(browser);
+            BrowserOwners.Remove(browser);
         }
 
         static void Initialize()
@@ -109,6 +117,43 @@ namespace Yozolab.Tabstep
             Apply(patch, harmony, harmonyMethodType, calculateRects,
                 postfix: typeof(ProjectBrowserPatcher).GetMethod(nameof(CalculateRectsPostfix), Self));
 
+            // Best-effort, ungated: intercept "Assets/Create/..." so the new asset is named
+            // through the column view (its overlay covers the browser's own rename field).
+            // A failure here must not sink the layout patches above — without this patch
+            // the column view only catches creations that finalise on disk (folders), not
+            // pre-imported ones (scripts) whose name has to be entered before they exist.
+            try
+            {
+                var beginRename = browser.GetMethod("BeginPreimportedNameEditing", InstanceFlags);
+                var beginRenamePrefix = typeof(ProjectBrowserPatcher).GetMethod(
+                    nameof(BeginPreimportedNameEditingPrefix), Self);
+                if (beginRename != null && beginRenamePrefix != null)
+                    Apply(patch, harmony, harmonyMethodType, beginRename, prefix: beginRenamePrefix);
+            }
+            catch (Exception e)
+            {
+                Debug.LogWarning($"[Tabstep] Could not hook BeginPreimportedNameEditing: {e}");
+            }
+
+            // Pin GetActiveFolderPath on the hosted browser to the active tab's folder so
+            // ProjectWindowUtil.Create* lands the new asset where the column view is
+            // actually looking — no matter what Selection.activeObject happens to be.
+            // Without this the destination drifted to whichever folder the last-selected
+            // asset belonged to, and the column view never saw the create that followed.
+            try
+            {
+                var getActiveFolderPath = browser.GetMethod("GetActiveFolderPath", InstanceFlags);
+                var getActiveFolderPathPrefix = typeof(ProjectBrowserPatcher).GetMethod(
+                    nameof(GetActiveFolderPathPrefix), Self);
+                if (getActiveFolderPath != null && getActiveFolderPathPrefix != null)
+                    Apply(patch, harmony, harmonyMethodType, getActiveFolderPath,
+                        prefix: getActiveFolderPathPrefix);
+            }
+            catch (Exception e)
+            {
+                Debug.LogWarning($"[Tabstep] Could not hook GetActiveFolderPath: {e}");
+            }
+
             // Best-effort, ungated: record asset pings so the type-column view can flash the
             // pinged item (the stock list draws that flash, but it hides behind the column
             // view). A failure here must not sink the layout patches above.
@@ -148,6 +193,60 @@ namespace Yozolab.Tabstep
                 }
             }
             patch.Invoke(harmony, args);
+        }
+
+        // ProjectBrowser.BeginPreimportedNameEditing(int, EndNameEditAction, string, Texture2D, string)
+        // — Unity's choke point for the "Assets/Create/..." inline rename. While the
+        // active tab is in TypeColumns mode the browser's own overlay is invisible
+        // (the column view covers the list area), so capture the request for the
+        // column view to drive and skip the original. Other tabs (Stock view) and
+        // every non-hosted browser run the standard path unchanged.
+        static bool BeginPreimportedNameEditingPrefix(
+            object __instance,
+            int instanceID,
+            UnityEditor.ProjectWindowCallback.EndNameEditAction endAction,
+            string pathName,
+            Texture2D icon,
+            string resourceFile)
+        {
+            if (!BrowserOwners.TryGetValue(__instance, out var owner) || owner == null) return true;
+            var window = owner as TabstepProjectWindow;
+            if (window == null || !window.ShouldInterceptNewAssetRename()) return true;
+
+            // Drive the active tab to wherever Unity is about to write the asset
+            // (right-click on a subfolder, asset selected in a different folder, ...)
+            // so the column-view phantom has the right folder under it. Without this
+            // step the original ran and left a phantom in the (covered) browser that
+            // only surfaced when the user toggled the column view off.
+            window.EnsureTabShowsForCreate(pathName);
+
+            AssetCreationBridge.Submit(owner, new AssetCreationBridge.Request
+            {
+                InstanceID = instanceID,
+                EndAction = endAction,
+                PathName = pathName,
+                Icon = icon,
+                ResourceFile = resourceFile,
+            });
+            owner.Repaint();
+            return false; // the column view runs the rename instead
+        }
+
+        // ProjectBrowser.GetActiveFolderPath() — override the result when called on a
+        // hosted browser whose column view is active. ProjectWindowUtil.Create* reads
+        // this through Selection.assetGUIDs / s_LastInteractedProjectBrowser, and we
+        // must hand back the tab's folder so the create lands where the user is
+        // looking instead of in whichever folder a stray Selection.activeObject
+        // happened to point at.
+        static bool GetActiveFolderPathPrefix(object __instance, ref string __result)
+        {
+            if (!BrowserOwners.TryGetValue(__instance, out var owner) || owner == null) return true;
+            var window = owner as TabstepProjectWindow;
+            if (window == null) return true;
+            var folder = window.ColumnViewCreateDestination();
+            if (string.IsNullOrEmpty(folder)) return true;
+            __result = folder;
+            return false;
         }
 
         // EditorGUIUtility.PingObject(Object) forwards to the int overload, so hooking this

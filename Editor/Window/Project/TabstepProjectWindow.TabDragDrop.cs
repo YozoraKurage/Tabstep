@@ -187,14 +187,28 @@ namespace Yozolab.Tabstep
             e.Use();
         }
 
-        /// <summary>Project-relative asset paths of the current drag (empty for scene-object drags).</summary>
+        /// <summary>
+        /// Project-relative asset paths of the current drag (empty for scene-object drags).
+        /// Reads both <see cref="DragAndDrop.paths"/> and <see cref="DragAndDrop.objectReferences"/>:
+        /// the stock browser's tree pane only populates the latter, so reading just paths
+        /// silently dropped tree-originated drags onto tab headers.
+        /// </summary>
         static List<string> DraggedProjectPaths()
         {
+            var seen = new HashSet<string>(StringComparer.Ordinal);
             var paths = new List<string>();
             foreach (var raw in DragAndDrop.paths)
             {
                 var path = ProjectPaths.Normalize(raw);
-                if (path == null) continue;
+                if (path == null || !seen.Add(path)) continue;
+                if (AssetDatabase.IsValidFolder(path) || AssetDatabase.GetMainAssetTypeAtPath(path) != null)
+                    paths.Add(path);
+            }
+            foreach (var obj in DragAndDrop.objectReferences)
+            {
+                if (obj == null) continue;
+                var path = ProjectPaths.Normalize(AssetDatabase.GetAssetPath(obj));
+                if (path == null || !seen.Add(path)) continue;
                 if (AssetDatabase.IsValidFolder(path) || AssetDatabase.GetMainAssetTypeAtPath(path) != null)
                     paths.Add(path);
             }

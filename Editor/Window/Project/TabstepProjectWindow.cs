@@ -212,6 +212,13 @@ namespace Yozolab.Tabstep
                 OpenFolderInNewTab = OpenInNewTab,
                 Repaint = Repaint,
                 MarkBrowserInteracted = _host.MarkAsLastInteracted,
+                TakePendingCreation = () => AssetCreationBridge.Take(this),
+                PollBrowserCreate = () => _host?.TakeBrowserCreateInProgress(),
+                DiscardPendingCreation = () =>
+                {
+                    AssetCreationBridge.Discard(this);
+                    _host?.ResetBrowserCreate();
+                },
             };
             if (_session.Count == 0)
                 _session.OpenTab(ValidFolderOrDefault(null));
@@ -327,7 +334,61 @@ namespace Yozolab.Tabstep
         void OnSelectionChange()
         {
             _statusSelectionTime = 0; // recompute on the next repaint
+            // The embedded browser's list-area selection backs Selection.assetGUIDs and
+            // the Assets/Export Package... / Find References menus when this is the
+            // last-interacted browser; without this push it stays at whatever was
+            // selected before the column view took over.
+            _host?.SyncListAreaSelection(Selection.instanceIDs);
             Repaint();
+        }
+
+        /// <summary>
+        /// True while the active tab covers the embedded browser's list pane with the
+        /// column view — the prefix on BeginPreimportedNameEditing should then route
+        /// the new-asset rename through the column view's overlay instead of leaving
+        /// the (hidden) browser overlay to drive it.
+        /// </summary>
+        internal bool ShouldInterceptNewAssetRename()
+        {
+            var tab = _session.ActiveTab;
+            if (tab == null || tab.ViewMode != ItemViewMode.TypeColumns) return false;
+            return _host != null && !_host.IsSearching();
+        }
+
+        /// <summary>
+        /// The folder to hand back from <c>ProjectBrowser.GetActiveFolderPath</c> on the
+        /// hosted browser while the column view is active — always the active tab's
+        /// folder, regardless of what asset Selection.activeObject is pointing at. This
+        /// is what makes "Create > X" land where the user is actually looking instead
+        /// of in the parent folder of some stray prior selection. Returns null to fall
+        /// back to Unity's default resolution (stock view, search mode, no tab).
+        /// </summary>
+        internal string ColumnViewCreateDestination()
+        {
+            var tab = _session.ActiveTab;
+            if (tab == null || tab.ViewMode != ItemViewMode.TypeColumns) return null;
+            if (_host == null || _host.IsSearching()) return null;
+            return string.IsNullOrEmpty(tab.CurrentPath) ? null : tab.CurrentPath;
+        }
+
+        /// <summary>
+        /// Navigates the active tab into the folder Unity is about to create the new
+        /// asset under, when the column view is currently showing a different folder.
+        /// Without this, the column-view phantom would never render (its parent
+        /// mismatch guard discards the request) and the user would only see Unity's
+        /// own phantom row appear when they toggle back to the stock view.
+        /// </summary>
+        internal void EnsureTabShowsForCreate(string newAssetPath)
+        {
+            if (string.IsNullOrEmpty(newAssetPath)) return;
+            var tab = _session.ActiveTab;
+            if (tab == null) return;
+            int slash = newAssetPath.LastIndexOf('/');
+            string parent = slash <= 0 ? string.Empty : newAssetPath.Substring(0, slash);
+            if (string.IsNullOrEmpty(parent) || parent == tab.CurrentPath) return;
+            if (!AssetDatabase.IsValidFolder(parent)) return;
+            tab.Navigate(parent);
+            _applyTabToBrowser = true;
         }
 
         void ShowPathBarContextMenu()

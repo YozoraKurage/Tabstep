@@ -101,6 +101,65 @@ namespace Yozolab.Tabstep
                 return p.Length == 2 && p[0].ParameterType == typeof(int[]) && p[1].ParameterType == typeof(bool);
             });
 
+        // public void InitSelection(int[] selectedInstanceIDs) on ObjectListArea — the
+        // list pane's selection store. Selection.assetGUIDs / Export Package / Find
+        // References query this on the last-interacted browser, so it must mirror the
+        // user's column-view selection or those features see a stale list.
+        static readonly MethodInfo ListAreaInitSelectionMethod = ListAreaField?.FieldType
+            .GetMethod("InitSelection", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
+
+        // CreateAssetUtility access — the fallback path when our Harmony prefix on
+        // BeginPreimportedNameEditing did not install (no Harmony, or a future Unity
+        // renamed the entry point). We poll the browser's in-flight create state out
+        // of here each Layout pass and reset it so the (invisible) browser overlay
+        // does not also run alongside the column-view rename.
+        static readonly MethodInfo ListAreaGetCreateAssetUtilityMethod = ListAreaField?.FieldType
+            .GetMethod("GetCreateAssetUtility", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
+        static readonly Type CreateAssetUtilityType = ListAreaGetCreateAssetUtilityMethod?.ReturnType;
+        static readonly MethodInfo CreateAssetUtilityIsCreatingMethod = CreateAssetUtilityType?
+            .GetMethod("IsCreatingNewAsset", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
+        static readonly PropertyInfo CreateAssetUtilityInstanceIDProp = CreateAssetUtilityType?
+            .GetProperty("instanceID", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
+        static readonly PropertyInfo CreateAssetUtilityEndActionProp = CreateAssetUtilityType?
+            .GetProperty("endAction", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
+        static readonly PropertyInfo CreateAssetUtilityIconProp = CreateAssetUtilityType?
+            .GetProperty("icon", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
+        // The full asset path being named (e.g. "Assets/Foo/NewBehaviourScript.cs").
+        // Unity calls the field m_Path but exposes it as `folder` for historical reasons.
+        static readonly PropertyInfo CreateAssetUtilityFolderProp = CreateAssetUtilityType?
+            .GetProperty("folder", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
+        static readonly PropertyInfo CreateAssetUtilityResourceFileProp = CreateAssetUtilityType?
+            .GetProperty("resourceFile", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
+        static readonly MethodInfo CreateAssetUtilityResetMethod = CreateAssetUtilityType?
+            .GetMethod("Reset", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
+
+        // Direct field access for the CreateAssetUtility state. The properties are the
+        // documented surface, but a single failed Reset() reflection lookup in any
+        // Unity build leaves the utility populated forever and our polling re-feeds
+        // the same request to the column view on every tick. Clearing the fields
+        // by hand is the belt to Reset's suspenders.
+        static readonly FieldInfo CreateAssetUtilityInstanceIDField = CreateAssetUtilityType?
+            .GetField("m_InstanceID", BindingFlags.Instance | BindingFlags.NonPublic);
+        static readonly FieldInfo CreateAssetUtilityPathField = CreateAssetUtilityType?
+            .GetField("m_Path", BindingFlags.Instance | BindingFlags.NonPublic);
+        static readonly FieldInfo CreateAssetUtilityIconField = CreateAssetUtilityType?
+            .GetField("m_Icon", BindingFlags.Instance | BindingFlags.NonPublic);
+        static readonly FieldInfo CreateAssetUtilityResourceFileField = CreateAssetUtilityType?
+            .GetField("m_ResourceFile", BindingFlags.Instance | BindingFlags.NonPublic);
+        static readonly FieldInfo CreateAssetUtilityEndActionField = CreateAssetUtilityType?
+            .GetField("m_EndAction", BindingFlags.Instance | BindingFlags.NonPublic);
+
+        // public RenameOverlay GetRenameOverlay() — on ObjectListArea. Needed so the
+        // browser's now-orphan inline rename overlay (it kept renaming after we Reset
+        // the create utility) gets dismissed; otherwise its hidden text field steals
+        // keyboard focus from the column view's overlay.
+        static readonly MethodInfo ListAreaGetRenameOverlayMethod = ListAreaField?.FieldType
+            .GetMethod("GetRenameOverlay", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
+        static readonly Type RenameOverlayType = ListAreaGetRenameOverlayMethod?.ReturnType;
+        static readonly MethodInfo RenameOverlayEndRenameMethod = RenameOverlayType?
+            .GetMethod("EndRename", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic,
+                null, new[] { typeof(bool) }, null);
+
         static MethodInfo FindMethod(string name, int paramCount)
         {
             return BrowserType?
@@ -135,6 +194,9 @@ namespace Yozolab.Tabstep
                 ParentField?.SetValue(_browser, null);
                 Object.DestroyImmediate(_browser);
             }
+            // Drop any captured Assets/Create/... request the owner never got around
+            // to consuming, so it does not leak into the next browser instance.
+            AssetCreationBridge.Discard(_owner);
             _browser = null;
         }
 
@@ -147,7 +209,7 @@ namespace Yozolab.Tabstep
             // Never saved into the layout file — the host window owns and recreates it.
             _browser.hideFlags = HideFlags.HideAndDontSave;
             // Opt this instance into the compact-layout Harmony patches (no-op without Harmony).
-            ProjectBrowserPatcher.Register(_browser);
+            ProjectBrowserPatcher.Register(_browser, _owner);
             AttachToOwner();
             // Init sizes its panes from `position`, so swap the placeholder rect a
             // fresh instance carries for the owner's size before running it.
@@ -446,6 +508,143 @@ namespace Yozolab.Tabstep
         {
             if (_browser == null) return null;
             return ProjectPaths.Normalize(Invoke(GetActiveFolderPathMethod) as string);
+        }
+
+        /// <summary>
+        /// Mirrors a list of instance ids into the embedded browser's list-area
+        /// selection. <see cref="Selection"/>.assetGUIDs and features built on it
+        /// (Assets/Export Package..., Find References in Project, ...) read this on
+        /// the last-interacted ProjectBrowser, so the column view must push its own
+        /// selection here or those features see whatever was selected before.
+        /// </summary>
+        public void SyncListAreaSelection(int[] selectedInstanceIDs)
+        {
+            if (_browser == null || ListAreaField == null || ListAreaInitSelectionMethod == null) return;
+            try
+            {
+                var listArea = ListAreaField.GetValue(_browser);
+                if (listArea == null) return;
+                ListAreaInitSelectionMethod.Invoke(listArea, new object[] { selectedInstanceIDs ?? Array.Empty<int>() });
+            }
+            catch (Exception e)
+            {
+                if (_warnedMethods.Add("InitSelection"))
+                    Debug.LogWarning($"[Tabstep] Could not sync the embedded browser's selection: {e}");
+            }
+        }
+
+        /// <summary>
+        /// Tears down any in-flight inline-rename create the embedded browser is
+        /// holding — resets the create utility and ends the rename overlay so the
+        /// post-handle check that calls EndAction.Cancelled does not fire and the
+        /// overlay's hidden text field stops grabbing focus. Safe to call when no
+        /// create is in flight.
+        /// </summary>
+        public void ResetBrowserCreate()
+        {
+            if (_browser == null || ListAreaField == null) return;
+            if (ListAreaGetCreateAssetUtilityMethod == null) return;
+            try
+            {
+                var listArea = ListAreaField.GetValue(_browser);
+                if (listArea == null) return;
+                var utility = ListAreaGetCreateAssetUtilityMethod.Invoke(listArea, null);
+                if (utility != null)
+                {
+                    CreateAssetUtilityResetMethod?.Invoke(utility, null);
+                    // Wipe the fields directly too — the only thing the polling check
+                    // gates on is m_InstanceID != 0 and a non-empty m_Path, so the
+                    // create utility must look unambiguously empty after this call.
+                    CreateAssetUtilityInstanceIDField?.SetValue(utility, 0);
+                    CreateAssetUtilityPathField?.SetValue(utility, string.Empty);
+                    CreateAssetUtilityIconField?.SetValue(utility, null);
+                    CreateAssetUtilityResourceFileField?.SetValue(utility, string.Empty);
+                    CreateAssetUtilityEndActionField?.SetValue(utility, null);
+                }
+                if (ListAreaGetRenameOverlayMethod != null && RenameOverlayEndRenameMethod != null)
+                {
+                    var overlay = ListAreaGetRenameOverlayMethod.Invoke(listArea, null);
+                    if (overlay != null) RenameOverlayEndRenameMethod.Invoke(overlay, new object[] { false });
+                }
+            }
+            catch (Exception e)
+            {
+                if (_warnedMethods.Add("ResetBrowserCreate"))
+                    Debug.LogWarning($"[Tabstep] Could not reset CreateAssetUtility: {e}");
+            }
+        }
+
+        /// <summary>
+        /// Reads any inline-rename create the embedded browser started (the path used
+        /// when our Harmony prefix on BeginPreimportedNameEditing did not install),
+        /// resets the browser's create utility and ends its rename overlay so the
+        /// column view can drive the rename. Returns null when nothing is pending.
+        /// </summary>
+        public AssetCreationBridge.Request TakeBrowserCreateInProgress()
+        {
+            if (_browser == null || ListAreaField == null) return null;
+            if (ListAreaGetCreateAssetUtilityMethod == null) return null;
+            try
+            {
+                var listArea = ListAreaField.GetValue(_browser);
+                if (listArea == null) return null;
+                var utility = ListAreaGetCreateAssetUtilityMethod.Invoke(listArea, null);
+                if (utility == null) return null;
+
+                // Read straight from the backing fields — properties have the same
+                // information and slightly different names across Unity versions
+                // ("folder" returning m_Path is the awkward example) so this path is
+                // both more robust and easier to keep clearing in lock-step.
+                int instanceID = CreateAssetUtilityInstanceIDField != null
+                    ? (int)CreateAssetUtilityInstanceIDField.GetValue(utility)
+                    : (CreateAssetUtilityInstanceIDProp != null
+                        ? (int)CreateAssetUtilityInstanceIDProp.GetValue(utility) : 0);
+                if (instanceID == 0) return null; // nothing in flight
+
+                string pathName = (CreateAssetUtilityPathField?.GetValue(utility) as string)
+                    ?? (CreateAssetUtilityFolderProp?.GetValue(utility) as string);
+                if (string.IsNullOrEmpty(pathName)) return null;
+
+                var request = new AssetCreationBridge.Request
+                {
+                    InstanceID = instanceID,
+                    PathName = pathName,
+                    Icon = (CreateAssetUtilityIconField?.GetValue(utility) as Texture2D)
+                        ?? (CreateAssetUtilityIconProp?.GetValue(utility) as Texture2D),
+                    ResourceFile = (CreateAssetUtilityResourceFileField?.GetValue(utility) as string)
+                        ?? (CreateAssetUtilityResourceFileProp?.GetValue(utility) as string),
+                    EndAction = (CreateAssetUtilityEndActionField?.GetValue(utility)
+                        as UnityEditor.ProjectWindowCallback.EndNameEditAction)
+                        ?? (CreateAssetUtilityEndActionProp?.GetValue(utility)
+                            as UnityEditor.ProjectWindowCallback.EndNameEditAction),
+                };
+
+                // Clear the browser's hold on the create — the post-handle check
+                // gates on IsCreatingNewAsset(), which reads m_InstanceID. Reset()
+                // first (Unity's own zeroing path), then wipe each field by hand so
+                // a missing Reset method binding cannot leave a partially-populated
+                // utility that the next poll would re-feed to the column view.
+                CreateAssetUtilityResetMethod?.Invoke(utility, null);
+                CreateAssetUtilityInstanceIDField?.SetValue(utility, 0);
+                CreateAssetUtilityPathField?.SetValue(utility, string.Empty);
+                CreateAssetUtilityIconField?.SetValue(utility, null);
+                CreateAssetUtilityResourceFileField?.SetValue(utility, string.Empty);
+                CreateAssetUtilityEndActionField?.SetValue(utility, null);
+                // Dismiss the now-orphan rename overlay so its hidden text field stops
+                // grabbing focus away from the column view's overlay.
+                if (ListAreaGetRenameOverlayMethod != null && RenameOverlayEndRenameMethod != null)
+                {
+                    var overlay = ListAreaGetRenameOverlayMethod.Invoke(listArea, null);
+                    if (overlay != null) RenameOverlayEndRenameMethod.Invoke(overlay, new object[] { false });
+                }
+                return request;
+            }
+            catch (Exception e)
+            {
+                if (_warnedMethods.Add("CreateAssetUtility"))
+                    Debug.LogWarning($"[Tabstep] Could not read CreateAssetUtility: {e}");
+                return null;
+            }
         }
 
         /// <summary>Points the embedded browser at a folder. False when the folder no longer exists.</summary>
