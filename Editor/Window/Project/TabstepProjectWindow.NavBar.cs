@@ -234,6 +234,19 @@ namespace Yozolab.Tabstep
                 // Create menu items target the last interacted Project browser's folder —
                 // make sure that's ours, since this click never reaches the browser.
                 _host.MarkAsLastInteracted();
+                // ProjectWindowUtil.GetActiveFolderPath falls back to Selection.activeObject
+                // in two-column mode whenever the tree pane lacks keyboard focus (it
+                // always does here — the column view covers it). Without anchoring the
+                // selection to the shown folder, Create > X lands in whichever folder the
+                // previously-selected asset lived in, leaving the column view empty and
+                // the embedded browser holding an orphan inline-rename phantom.
+                var here = _session.ActiveTab?.CurrentPath;
+                if (!string.IsNullOrEmpty(here))
+                {
+                    var folderObj = AssetDatabase.LoadMainAssetAtPath(here);
+                    if (folderObj != null && folderObj != Selection.activeObject)
+                        Selection.activeObject = folderObj;
+                }
                 EditorUtility.DisplayPopupMenu(rect, "Assets/Create", null);
             }
         }
