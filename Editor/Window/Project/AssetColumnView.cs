@@ -172,6 +172,14 @@ namespace Yozolab.Tabstep
         // reach back into the bridge and the embedded browser to discard any stale
         // pending state without changing every internal call site to take a Host.
         Host _lastHost;
+        // The last create request we drained, retained until a different request
+        // arrives. Acts as a single-frame debounce against the runaway loop where
+        // a stale browser CreateAssetUtility (its Reset reflection silently missed
+        // in some Unity build) kept re-feeding the same request to ConsumePendingCreation,
+        // re-arming the rename overlay and re-firing CommitRename — which in turn
+        // re-created the asset over and over.
+        int _lastConsumedInstanceID;
+        string _lastConsumedPathName;
 
         class Column
         {
@@ -725,6 +733,18 @@ namespace Yozolab.Tabstep
                 ?? host.PollBrowserCreate?.Invoke();
             if (request == null) return;
 
+            // Defend against the runaway loop: if this request is the same (id +
+            // path) one we just consumed, swallow it. Some Unity builds keep
+            // CreateAssetUtility populated even after our Reset reflection ran,
+            // so polling would otherwise re-arm the rename every tick and the
+            // MouseDown auto-commit would re-create the folder forever.
+            if (request.InstanceID == _lastConsumedInstanceID &&
+                request.PathName == _lastConsumedPathName)
+            {
+                host.DiscardPendingCreation?.Invoke();
+                return;
+            }
+
             // Discard a request meant for a folder we no longer show (the user
             // navigated away between the Create click and this event pass): if we
             // kept it, the phantom would never render and the user would be stuck
@@ -743,6 +763,8 @@ namespace Yozolab.Tabstep
             _renamePath = request.PathName;
             _renameText = Path.GetFileNameWithoutExtension(request.PathName);
             _renameFocusPending = true;
+            _lastConsumedInstanceID = request.InstanceID;
+            _lastConsumedPathName = request.PathName;
             host.Repaint?.Invoke();
         }
 
