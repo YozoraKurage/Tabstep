@@ -392,21 +392,12 @@ namespace Yozolab.Tabstep
                     Selection.activeObject = AssetDatabase.LoadMainAssetAtPath(path);
                     _selectionAnchor = path;
                 }
-                else if (path == null && !string.IsNullOrEmpty(_builtFolder))
-                {
-                    // Right-click on empty space: Unity's Assets/Create resolves the
-                    // destination from Selection.activeObject (in two-column mode the
-                    // tree pane never has focus while the column view is active, so
-                    // the tree fallback is skipped). Anchor it to the shown folder so
-                    // Create > Folder lands here instead of in whatever folder the
-                    // previously-selected asset happened to live in.
-                    var here = AssetDatabase.LoadMainAssetAtPath(_builtFolder);
-                    if (here != null && here != Selection.activeObject)
-                    {
-                        Selection.activeObject = here;
-                        _selectionAnchor = _builtFolder;
-                    }
-                }
+                // Empty-area right-click intentionally leaves Selection untouched —
+                // ProjectBrowserPatcher's GetActiveFolderPath patch pins the create
+                // destination to the active tab's folder directly, so anchoring
+                // Selection here is unnecessary and would cause the browser's own
+                // OnSelectionChange handler to push the folder into m_LastFolders
+                // and fire extra cascading state changes.
                 host.MarkBrowserInteracted?.Invoke();
                 EditorUtility.DisplayPopupMenu(new Rect(e.mousePosition.x, e.mousePosition.y, 0, 0), "Assets/", null);
                 e.Use();

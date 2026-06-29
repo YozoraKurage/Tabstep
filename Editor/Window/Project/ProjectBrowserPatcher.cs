@@ -135,6 +135,25 @@ namespace Yozolab.Tabstep
                 Debug.LogWarning($"[Tabstep] Could not hook BeginPreimportedNameEditing: {e}");
             }
 
+            // Pin GetActiveFolderPath on the hosted browser to the active tab's folder so
+            // ProjectWindowUtil.Create* lands the new asset where the column view is
+            // actually looking — no matter what Selection.activeObject happens to be.
+            // Without this the destination drifted to whichever folder the last-selected
+            // asset belonged to, and the column view never saw the create that followed.
+            try
+            {
+                var getActiveFolderPath = browser.GetMethod("GetActiveFolderPath", InstanceFlags);
+                var getActiveFolderPathPrefix = typeof(ProjectBrowserPatcher).GetMethod(
+                    nameof(GetActiveFolderPathPrefix), Self);
+                if (getActiveFolderPath != null && getActiveFolderPathPrefix != null)
+                    Apply(patch, harmony, harmonyMethodType, getActiveFolderPath,
+                        prefix: getActiveFolderPathPrefix);
+            }
+            catch (Exception e)
+            {
+                Debug.LogWarning($"[Tabstep] Could not hook GetActiveFolderPath: {e}");
+            }
+
             // Best-effort, ungated: record asset pings so the type-column view can flash the
             // pinged item (the stock list draws that flash, but it hides behind the column
             // view). A failure here must not sink the layout patches above.
@@ -211,6 +230,23 @@ namespace Yozolab.Tabstep
             });
             owner.Repaint();
             return false; // the column view runs the rename instead
+        }
+
+        // ProjectBrowser.GetActiveFolderPath() — override the result when called on a
+        // hosted browser whose column view is active. ProjectWindowUtil.Create* reads
+        // this through Selection.assetGUIDs / s_LastInteractedProjectBrowser, and we
+        // must hand back the tab's folder so the create lands where the user is
+        // looking instead of in whichever folder a stray Selection.activeObject
+        // happened to point at.
+        static bool GetActiveFolderPathPrefix(object __instance, ref string __result)
+        {
+            if (!BrowserOwners.TryGetValue(__instance, out var owner) || owner == null) return true;
+            var window = owner as TabstepProjectWindow;
+            if (window == null) return true;
+            var folder = window.ColumnViewCreateDestination();
+            if (string.IsNullOrEmpty(folder)) return true;
+            __result = folder;
+            return false;
         }
 
         // EditorGUIUtility.PingObject(Object) forwards to the int overload, so hooking this

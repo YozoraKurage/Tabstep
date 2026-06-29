@@ -356,6 +356,22 @@ namespace Yozolab.Tabstep
         }
 
         /// <summary>
+        /// The folder to hand back from <c>ProjectBrowser.GetActiveFolderPath</c> on the
+        /// hosted browser while the column view is active — always the active tab's
+        /// folder, regardless of what asset Selection.activeObject is pointing at. This
+        /// is what makes "Create > X" land where the user is actually looking instead
+        /// of in the parent folder of some stray prior selection. Returns null to fall
+        /// back to Unity's default resolution (stock view, search mode, no tab).
+        /// </summary>
+        internal string ColumnViewCreateDestination()
+        {
+            var tab = _session.ActiveTab;
+            if (tab == null || tab.ViewMode != ItemViewMode.TypeColumns) return null;
+            if (_host == null || _host.IsSearching()) return null;
+            return string.IsNullOrEmpty(tab.CurrentPath) ? null : tab.CurrentPath;
+        }
+
+        /// <summary>
         /// Navigates the active tab into the folder Unity is about to create the new
         /// asset under, when the column view is currently showing a different folder.
         /// Without this, the column-view phantom would never render (its parent
