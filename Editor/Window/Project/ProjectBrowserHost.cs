@@ -518,6 +518,36 @@ namespace Yozolab.Tabstep
         }
 
         /// <summary>
+        /// Tears down any in-flight inline-rename create the embedded browser is
+        /// holding — resets the create utility and ends the rename overlay so the
+        /// post-handle check that calls EndAction.Cancelled does not fire and the
+        /// overlay's hidden text field stops grabbing focus. Safe to call when no
+        /// create is in flight.
+        /// </summary>
+        public void ResetBrowserCreate()
+        {
+            if (_browser == null || ListAreaField == null) return;
+            if (ListAreaGetCreateAssetUtilityMethod == null) return;
+            try
+            {
+                var listArea = ListAreaField.GetValue(_browser);
+                if (listArea == null) return;
+                var utility = ListAreaGetCreateAssetUtilityMethod.Invoke(listArea, null);
+                if (utility != null) CreateAssetUtilityResetMethod?.Invoke(utility, null);
+                if (ListAreaGetRenameOverlayMethod != null && RenameOverlayEndRenameMethod != null)
+                {
+                    var overlay = ListAreaGetRenameOverlayMethod.Invoke(listArea, null);
+                    if (overlay != null) RenameOverlayEndRenameMethod.Invoke(overlay, new object[] { false });
+                }
+            }
+            catch (Exception e)
+            {
+                if (_warnedMethods.Add("ResetBrowserCreate"))
+                    Debug.LogWarning($"[Tabstep] Could not reset CreateAssetUtility: {e}");
+            }
+        }
+
+        /// <summary>
         /// Reads any inline-rename create the embedded browser started (the path used
         /// when our Harmony prefix on BeginPreimportedNameEditing did not install),
         /// resets the browser's create utility and ends its rename overlay so the

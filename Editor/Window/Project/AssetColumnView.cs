@@ -90,6 +90,11 @@ namespace Yozolab.Tabstep
             // browser already started out of its ObjectListArea and tears that state
             // down so only the column view drives the rename.
             public Func<AssetCreationBridge.Request> PollBrowserCreate;
+            // Forcefully clears every backing store of the in-flight create — the
+            // bridge entry, the embedded browser's CreateAssetUtility and its rename
+            // overlay. Called after each commit/cancel so a stale request cannot
+            // re-arm the phantom on the next click.
+            public Action DiscardPendingCreation;
         }
 
         // ---- layout constants ----
@@ -163,6 +168,10 @@ namespace Yozolab.Tabstep
         // invokes the captured EndNameEditAction.Action (which writes the asset);
         // Escape or focus loss invokes EndNameEditAction.Cancelled.
         AssetCreationBridge.Request _creation;
+        // Latest Host passed into HandleEvents — kept so CommitRename / EndRename can
+        // reach back into the bridge and the embedded browser to discard any stale
+        // pending state without changing every internal call site to take a Host.
+        Host _lastHost;
 
         class Column
         {
@@ -185,6 +194,14 @@ namespace Yozolab.Tabstep
 
         public void HandleEvents(Rect listRect, string folder, AssetSortKey key, bool descending, Host host)
         {
+            _lastHost = host;
+            // A creation whose folder no longer matches the shown folder is stale —
+            // the user navigated mid-name-input. Tear it down before anything else
+            // so the next click is a normal click, not an auto-commit of the stale
+            // request that would create the asset somewhere the user isn't looking.
+            if (_creation != null && !string.IsNullOrEmpty(folder) &&
+                ParentFolder(_creation.PathName) != folder)
+                EndRename();
             ConsumePendingCreation(folder, host);
             EnsureBuilt(folder, key, descending);
             var e = Event.current;
@@ -840,6 +857,15 @@ namespace Yozolab.Tabstep
                         _selectionAnchor = createdPath;
                     }
                 }
+                // Wipe every backing store of the in-flight create — the bridge entry
+                // (in case Unity re-fired BeginPreimportedNameEditing during the
+                // EndAction itself) and the browser's CreateAssetUtility. Without this,
+                // the next MouseDown drains the leftover request, re-arms _renamePath
+                // and auto-commits the SAME placeholder yet again on the click — which
+                // is exactly the "asset keeps being created on every click after
+                // navigating away" loop reported on 2026-06-28.
+                _lastHost.DiscardPendingCreation?.Invoke();
+                _lastHost.Repaint?.Invoke();
                 ProjectVersion++; // the phantom is gone; the real asset (if created) takes its slot
                 return;
             }
@@ -871,7 +897,9 @@ namespace Yozolab.Tabstep
         void EndRename()
         {
             // If a brand-new asset was being named, tell Unity to discard the
-            // would-be creation (delete its temporary preview, free its instance id).
+            // would-be creation (delete its temporary preview, free its instance id)
+            // and also wipe the bridge / browser create state so the cancelled
+            // request cannot be re-drained on the next click.
             if (_creation != null)
             {
                 var c = _creation;
@@ -884,6 +912,7 @@ namespace Yozolab.Tabstep
                 {
                     Debug.LogWarning($"Tabstep: cancelling \"{c.PathName}\" threw: {e}");
                 }
+                _lastHost.DiscardPendingCreation?.Invoke();
                 ProjectVersion++; // drop the phantom from the columns
             }
             _renamePath = null;
