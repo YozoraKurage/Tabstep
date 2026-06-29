@@ -213,6 +213,7 @@ namespace Yozolab.Tabstep
                 Repaint = Repaint,
                 MarkBrowserInteracted = _host.MarkAsLastInteracted,
                 TakePendingCreation = () => AssetCreationBridge.Take(this),
+                PollBrowserCreate = () => _host?.TakeBrowserCreateInProgress(),
             };
             if (_session.Count == 0)
                 _session.OpenTab(ValidFolderOrDefault(null));
