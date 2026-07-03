@@ -22,9 +22,7 @@ namespace Yozolab.Tabstep
     /// Alt+Left/Right or mouse side buttons back/forward, Alt+Up parent folder,
     /// Ctrl+L / Alt+D edit the path, Ctrl+F focus the search field,
     /// Ctrl+Shift+C copy the absolute path, Ctrl+Shift+D summon the shelf
-    /// to the mouse (adding the selection). With WASD navigation enabled
-    /// (Preferences) the bare W/S keys step the selection through the shown
-    /// folder, D opens the selected folder/asset and A goes back.
+    /// to the mouse (adding the selection).
     /// </summary>
     internal sealed partial class TabstepProjectWindow : EditorWindow
     {
