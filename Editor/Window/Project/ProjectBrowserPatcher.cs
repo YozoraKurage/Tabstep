@@ -42,6 +42,13 @@ namespace Yozolab.Tabstep
         static bool _initialized;
         static bool _active;
 
+        // Non-zero while a Tabstep-internal caller wants the browser's real
+        // GetActiveFolderPath — used by SyncWithBrowser and the host's own
+        // navigation detector to read the folder the tree pane clicked into,
+        // instead of the tab-path override Unity's Create code needs. Counter,
+        // not bool, so nested bypass scopes unwind cleanly.
+        [ThreadStatic] static int _bypassDepth;
+
         /// <summary>True when Harmony was found and every patch applied.</summary>
         public static bool Active
         {
@@ -65,6 +72,21 @@ namespace Yozolab.Tabstep
             if (browser == null) return;
             HostedBrowsers.Remove(browser);
             BrowserOwners.Remove(browser);
+        }
+
+        /// <summary>
+        /// Ask the <see cref="GetActiveFolderPathPrefix"/> to fall through to Unity's
+        /// original implementation for the duration of the returned scope. Used by
+        /// Tabstep's own callers (browser-navigation detector, sync loop) so they
+        /// read the real folder the browser shows, not the tab-path override we
+        /// hand back to <c>ProjectWindowUtil.Create*</c>. Safe to nest.
+        /// </summary>
+        public static IDisposable BypassGetActiveFolderPath() => new BypassScope();
+
+        sealed class BypassScope : IDisposable
+        {
+            public BypassScope() { _bypassDepth++; }
+            public void Dispose() { if (_bypassDepth > 0) _bypassDepth--; }
         }
 
         static void Initialize()
@@ -240,6 +262,11 @@ namespace Yozolab.Tabstep
         // happened to point at.
         static bool GetActiveFolderPathPrefix(object __instance, ref string __result)
         {
+            // Tabstep's own callers (SyncWithBrowser, RepaintOwnerOnSelfNavigation)
+            // wrap their call in BypassGetActiveFolderPath so they observe tree-pane
+            // clicks. Without this fallthrough the override made those clicks
+            // invisible and the active tab never followed the tree selection.
+            if (_bypassDepth > 0) return true;
             if (!BrowserOwners.TryGetValue(__instance, out var owner) || owner == null) return true;
             var window = owner as TabstepProjectWindow;
             if (window == null) return true;

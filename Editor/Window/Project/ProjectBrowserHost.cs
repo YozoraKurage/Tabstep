@@ -507,7 +507,12 @@ namespace Yozolab.Tabstep
         public string GetActiveFolderPath()
         {
             if (_browser == null) return null;
-            return ProjectPaths.Normalize(Invoke(GetActiveFolderPathMethod) as string);
+            // Bypass the ProjectBrowserPatcher override — its job is to point
+            // Assets/Create at the active tab. Our own callers use this method to
+            // detect the browser navigating itself (tree-pane click, self folder
+            // double-click) and need the real value back.
+            using (ProjectBrowserPatcher.BypassGetActiveFolderPath())
+                return ProjectPaths.Normalize(Invoke(GetActiveFolderPathMethod) as string);
         }
 
         /// <summary>
