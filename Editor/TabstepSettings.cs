@@ -88,17 +88,6 @@ namespace Yozolab.Tabstep
         }
 
         /// <summary>
-        /// W/S step the selection through the shown folder, D opens the selected
-        /// folder/asset and A goes back — keyboard browsing without leaving the home
-        /// row. Suppressed while typing (rename, search, path bar).
-        /// </summary>
-        public static bool WasdSelectionNavigation
-        {
-            get => EditorPrefs.GetBool(Prefix + "WasdSelectionNavigation", true);
-            set => EditorPrefs.SetBool(Prefix + "WasdSelectionNavigation", value);
-        }
-
-        /// <summary>
         /// Allow dropping assets onto folder entries in the type-column view to move them
         /// there. Off by default — the view normally swallows drags so they fall through to
         /// real targets (scene, object fields, the folder tree).
@@ -115,7 +104,7 @@ namespace Yozolab.Tabstep
             {
                 "NewTabFolder", "MiddleClickClosesTab", "ShowNavigationBar", "MaxTabTitleLength",
                 "PingOpensNewTab", "MouseSideButtonsNavigate", "NewTabBesideActive", "ShelfOneShot",
-                "ShowStatusBar", "WasdSelectionNavigation", "ColumnViewFolderDrop", "EqualWidthTabs",
+                "ShowStatusBar", "ColumnViewFolderDrop", "EqualWidthTabs",
             };
             foreach (var key in keys)
                 EditorPrefs.DeleteKey(Prefix + key);
@@ -138,8 +127,7 @@ namespace Yozolab.Tabstep
                 {
                     "project", "browser", "tab", "explorer", "breadcrumb", "history",
                     "inspector", "ping", "double click", "mouse", "side button", "path header",
-                    "shelf", "pin", "quick access", "bookmark", "reorder", "wasd", "keyboard",
-                    "selection",
+                    "shelf", "pin", "quick access", "bookmark", "reorder", "selection",
                 }),
             };
         }
@@ -200,12 +188,6 @@ namespace Yozolab.Tabstep
                     "When something outside the window (an Inspector object field, \"Show in Project\"...) " +
                     "changes the shown folder, open it as a new tab instead of replacing the current one."),
                 TabstepSettings.PingOpensNewTab);
-            TabstepSettings.WasdSelectionNavigation = EditorGUILayout.Toggle(
-                new GUIContent("WASD Navigation",
-                    "W/S step the selection through the shown folder, D opens the selected " +
-                    "folder or asset and A goes back. Inactive while typing in a text field " +
-                    "(rename, search, path bar)."),
-                TabstepSettings.WasdSelectionNavigation);
             TabstepSettings.ColumnViewFolderDrop = EditorGUILayout.Toggle(
                 new GUIContent("Column View Folder Drop",
                     "In the type-column view, allow dropping assets onto a folder entry to move " +
