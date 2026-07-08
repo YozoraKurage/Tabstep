@@ -4,6 +4,8 @@ name: "Release"
 #   1. VPM リスティング通知用の PAT (LISTING_DISPATCH_TOKEN) を事前検証
 #      （トークン切れ・権限不足ならバージョン更新もリリースもせずに失敗させる）
 #   2. PR ラベル (major / minor / patch) から semver を判定し package.json を更新
+#      （ラベル無しは patch。`no-bump` ラベルが付いた PR は下の job 条件で
+#        丸ごとスキップされ、バージョン更新もリリースも一切行わない）
 #   3. vpm-packager で .unitypackage / .zip を生成
 #   4. ビルドが通ってからバージョン更新を main へコミット
 #   5. 生成パッケージを正式 Release として公開（タグ自動作成）
@@ -48,8 +50,11 @@ env:
 
 jobs:
   release:
-    # マージされた PR か、手動実行のときだけ走らせる（クローズのみの PR は無視）
-    if: ${{ github.event_name == 'workflow_dispatch' || github.event.pull_request.merged == true }}
+    # マージされた PR か、手動実行のときだけ走らせる（クローズのみの PR は無視）。
+    # ただし `no-bump` ラベルの付いた PR はスキップする — CI/インフラやドキュメントの
+    # ような、バージョンを上げたくない変更をリリースを切らずに main へ入れるための逃げ道。
+    # 手動実行 (workflow_dispatch) はラベルの概念が無いので常に対象（bump=none で再リリース可）。
+    if: ${{ github.event_name == 'workflow_dispatch' || (github.event.pull_request.merged == true && !contains(github.event.pull_request.labels.*.name, 'no-bump')) }}
     runs-on: "ubuntu-latest"
     steps:
       # 過去に「Release 公開後にリスティング通知だけが PAT の権限不足で失敗し、
