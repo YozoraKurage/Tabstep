@@ -234,6 +234,29 @@ namespace Yozolab.Tabstep
             if (!BrowserOwners.TryGetValue(__instance, out var owner) || owner == null) return true;
             var window = owner as TabstepProjectWindow;
             if (window == null || !window.ShouldInterceptNewAssetRename()) return true;
+            if (string.IsNullOrEmpty(pathName)) return true;
+
+            // Unity's built-in creates hand this method a bare file name ("New
+            // Folder", "NewBehaviourScript.cs", ...); the resolution to a full
+            // project path lives in CreateAssetUtility.BeginNewAssetCreation —
+            // inside the very call this prefix skips. Mirror it here, against the
+            // active tab's folder (where the GetActiveFolderPath patch below pins
+            // every create). Everything downstream assumes a full path: a bare
+            // name fell into the column view's folder-mismatch guard, which
+            // silently cancelled the whole create — no phantom, no rename, no asset.
+            pathName = pathName.Replace('\\', '/');
+            if (!pathName.StartsWith("assets/", StringComparison.OrdinalIgnoreCase) &&
+                !pathName.StartsWith("packages/", StringComparison.OrdinalIgnoreCase))
+            {
+                string destination = window.ColumnViewCreateDestination();
+                if (string.IsNullOrEmpty(destination)) return true; // no tab folder — stock flow
+                pathName = AssetDatabase.GenerateUniqueAssetPath(destination + "/" + pathName);
+            }
+            else
+            {
+                // Already a full path — unique-ify it exactly like the skipped original.
+                pathName = AssetDatabase.GenerateUniqueAssetPath(pathName);
+            }
 
             // Drive the active tab to wherever Unity is about to write the asset
             // (right-click on a subfolder, asset selected in a different folder, ...)
