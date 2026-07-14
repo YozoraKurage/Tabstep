@@ -173,11 +173,15 @@ namespace Yozolab.Tabstep
         // pending state without changing every internal call site to take a Host.
         Host _lastHost;
         // The last create request we drained, retained until a different request
-        // arrives. Acts as a single-frame debounce against the runaway loop where
-        // a stale browser CreateAssetUtility (its Reset reflection silently missed
-        // in some Unity build) kept re-feeding the same request to ConsumePendingCreation,
-        // re-arming the rename overlay and re-firing CommitRename — which in turn
-        // re-created the asset over and over.
+        // arrives. Debounces ONLY the PollBrowserCreate fallback against the runaway
+        // loop where a stale browser CreateAssetUtility (its Reset reflection silently
+        // missed in some Unity build) kept re-feeding the same request to
+        // ConsumePendingCreation, re-arming the rename overlay and re-firing
+        // CommitRename — which in turn re-created the asset over and over.
+        // Bridge requests must never be debounced against this: preimported creates
+        // all arrive with the same constant instance id (Unity swaps instanceID 0
+        // for kAssetCreationInstanceID_ForNonExistingAssets) and the same default
+        // path, so two legitimate consecutive creates look identical here.
         int _lastConsumedInstanceID;
         string _lastConsumedPathName;
 
@@ -330,6 +334,11 @@ namespace Yozolab.Tabstep
                     _dropFolder = null;
                     break;
 
+                case EventType.ValidateCommand:
+                case EventType.ExecuteCommand:
+                    RouteCommandToSelection(e);
+                    break;
+
                 case EventType.MouseUp:
                     if (_thumbDrag != 0) { _thumbDrag = 0; e.Use(); }
                     else if (_clickSelectPending)
@@ -352,6 +361,13 @@ namespace Yozolab.Tabstep
 
         void HandleListMouseDown(Event e, Layout lay, Host host)
         {
+            // Take keyboard focus, as a click on the stock list area would. This view
+            // covers the list, so the list's own focus-claiming click never runs and
+            // the browser's folder tree would keep keyboard focus forever — routing
+            // Duplicate/Delete/Cut/Copy/Paste commands to the TREE selection (the
+            // shown folder) instead of the assets selected here.
+            GUIUtility.keyboardControl = 0;
+
             var path = HitTest(e.mousePosition, lay, out bool isFolder);
 
             if (e.button == 0)
@@ -710,6 +726,45 @@ namespace Yozolab.Tabstep
             return true;
         }
 
+        // Commands ProjectBrowser.HandleCommandEventsForTreeView hijacks whenever the
+        // folder tree has keyboard focus — acting on the TREE selection, i.e. the
+        // shown folder itself, not on what the user selected in this view.
+        static bool IsTreeHijackedCommand(string name) =>
+            name == "Duplicate" || name == "Delete" || name == "SoftDelete" ||
+            name == "Cut" || name == "Copy" || name == "Paste";
+
+        /// <summary>
+        /// The browser's folder tree keeps keyboard focus while this view covers the
+        /// list (the list's focus-claiming click can never run), so the embedded
+        /// browser routes Duplicate/Delete/Cut/Copy/Paste to the tree's selection —
+        /// the shown folder — duplicating or deleting the folder the user is looking
+        /// at instead of the assets selected here. When the selection is visible in
+        /// this view, take the tree's keyboard focus away and let the event flow on:
+        /// the browser's generic command handler then acts on the global selection,
+        /// which is exactly what the stock list would have done. A selection outside
+        /// this view (a folder picked in the tree pane) keeps the stock tree handling.
+        /// </summary>
+        void RouteCommandToSelection(Event e)
+        {
+            // Never yank focus from an active text field (rename overlay, search,
+            // path bar) — Copy/Paste there must keep operating on the text.
+            if (EditorGUIUtility.editingTextField || _renamePath != null) return;
+            if (!IsTreeHijackedCommand(e.commandName)) return;
+            if (!SelectionIsShownHere()) return;
+            GUIUtility.keyboardControl = 0;
+        }
+
+        /// <summary>True when any selected asset is one of this view's rows.</summary>
+        bool SelectionIsShownHere()
+        {
+            foreach (var obj in Selection.objects)
+            {
+                var path = AssetDatabase.GetAssetPath(obj);
+                if (!string.IsNullOrEmpty(path) && FindItem(path, out _, out _)) return true;
+            }
+            return false;
+        }
+
         /// <summary>
         /// Picks up a pending Assets/Create/... request and switches the column view
         /// into "naming a new asset" mode. The request was deposited by the Harmony
@@ -720,16 +775,23 @@ namespace Yozolab.Tabstep
         {
             // An in-progress create still owns the rename overlay — leave it alone.
             if (_creation != null) return;
-            var request = host.TakePendingCreation?.Invoke()
-                ?? host.PollBrowserCreate?.Invoke();
+            var request = host.TakePendingCreation?.Invoke();
+            bool polled = request == null;
+            if (polled) request = host.PollBrowserCreate?.Invoke();
             if (request == null) return;
 
-            // Defend against the runaway loop: if this request is the same (id +
-            // path) one we just consumed, swallow it. Some Unity builds keep
-            // CreateAssetUtility populated even after our Reset reflection ran,
-            // so polling would otherwise re-arm the rename every tick and the
-            // MouseDown auto-commit would re-create the folder forever.
-            if (request.InstanceID == _lastConsumedInstanceID &&
+            // Defend against the runaway loop, but only on the polled fallback: some
+            // Unity builds keep CreateAssetUtility populated even after our Reset
+            // reflection ran, so polling would otherwise re-arm the rename every tick
+            // and the MouseDown auto-commit would re-create the folder forever.
+            // Bridge requests are exempt: each one is a real user-initiated
+            // BeginPreimportedNameEditing call (Take() already removes it, so it
+            // cannot self-repeat), and preimported creates reuse the exact same
+            // (constant id, "Assets/.../New Folder") pair for every create —
+            // debouncing them silently swallowed any repeat create whose previous
+            // placeholder name was renamed away or cancelled.
+            if (polled &&
+                request.InstanceID == _lastConsumedInstanceID &&
                 request.PathName == _lastConsumedPathName)
             {
                 host.DiscardPendingCreation?.Invoke();
