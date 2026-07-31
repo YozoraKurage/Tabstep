@@ -1,7 +1,9 @@
 using System;
 using System.Collections.Generic;
 using System.IO;
+using System.Reflection;
 using UnityEditor;
+using UnityEditor.Animations;
 using UnityEngine;
 using Object = UnityEngine.Object;
 
@@ -104,6 +106,11 @@ namespace Yozolab.Tabstep
         const float RowHeight = 20f;
         const float IconSize = 16f;
         const float Padding = 6f;
+        // Width of the foldout-arrow gutter (columns that contain at least one
+        // expandable row reserve it on every row so their icons stay aligned) and
+        // the extra indent of a sub-asset row under its unfolded parent.
+        const float FoldoutWidth = 14f;
+        const float SubIndent = 14f;
         const float ScrollbarThickness = 13f;
         const float DragThreshold = 6f;
         const float MinThumb = 24f;
@@ -122,6 +129,13 @@ namespace Yozolab.Tabstep
         // phantom row appears/disappears when the request arrives or completes.
         string _builtCreationPath;
         readonly List<Column> _columns = new List<Column>();
+
+        // Asset paths whose sub-assets are currently unfolded. Keyed by path (not
+        // instance id) so the state survives navigation away and back; toggling
+        // bumps the stamp so EnsureBuilt rebuilds without resetting the scroll.
+        readonly HashSet<string> _expanded = new HashSet<string>();
+        int _expandStamp;
+        int _builtExpandStamp = -1;
 
         // Press / potential-drag state for the list.
         string _pressedPath;
@@ -189,14 +203,62 @@ namespace Yozolab.Tabstep
         {
             public string Label;
             public readonly List<Item> Items = new List<Item>();
+            // True when any row owns a foldout — every row then reserves the arrow
+            // gutter so icons across the column stay aligned.
+            public bool HasFoldouts;
         }
 
         struct Item
         {
+            // Asset path for a file/folder row; a "sub::<instanceID>" key for a
+            // sub-asset row (sub-assets have no path of their own — they live
+            // inside their parent's file).
             public string Path;
             public string Name;
             public long Size;
             public long DateTicks;
+            // Nonzero only on sub-asset rows: the sub-object's instance id.
+            public int InstanceID;
+            // Sub-asset rows carry their icon from the build (the native hierarchy
+            // hands it out without loading the object; a path lookup cannot).
+            public Texture Icon;
+            // This row is a file with sub-assets to unfold, and whether it currently is.
+            public bool HasSub;
+            public bool Expanded;
+        }
+
+        // ---- sub-asset row keys --------------------------------------------------
+
+        // Sub-asset rows are keyed by instance id (session-stable) so every string
+        // keyed piece of view state — hover, press, anchor, selection sets — works
+        // unchanged for them. The prefix cannot collide with an asset path.
+        const string SubKeyPrefix = "sub::";
+
+        static string SubKey(int instanceID) => SubKeyPrefix + instanceID;
+
+        static bool IsSubKey(string key) =>
+            key != null && key.StartsWith(SubKeyPrefix, StringComparison.Ordinal);
+
+        static int SubKeyInstanceID(string key) =>
+            int.TryParse(key.Substring(SubKeyPrefix.Length), out int id) ? id : 0;
+
+        /// <summary>The object a row stands for: the main asset of a path row, the sub-object of a sub row.</summary>
+        static Object ResolveRow(string key)
+        {
+            if (key == null) return null;
+            return IsSubKey(key)
+                ? EditorUtility.InstanceIDToObject(SubKeyInstanceID(key))
+                : AssetDatabase.LoadMainAssetAtPath(key);
+        }
+
+        /// <summary>Row key of the active selection (path, or sub key for a sub-asset), or null.</summary>
+        static string ActiveKey()
+        {
+            var o = Selection.activeObject;
+            if (o == null) return null;
+            var path = AssetDatabase.GetAssetPath(o);
+            if (string.IsNullOrEmpty(path)) return null;
+            return AssetDatabase.IsMainAsset(o) ? path : SubKey(o.GetInstanceID());
         }
 
         /// <summary>Forces a rebuild on the next pass (view toggled, sort changed, project changed).</summary>
@@ -219,7 +281,7 @@ namespace Yozolab.Tabstep
             var e = Event.current;
             var lay = Measure(listRect);
 
-            HandlePing(lay, host);
+            HandlePing(listRect, ref lay, host);
 
             switch (e.type)
             {
@@ -346,7 +408,7 @@ namespace Yozolab.Tabstep
                         // A plain click that never became a drag: select now (this is the
                         // point the Inspector is allowed to switch).
                         Selection.activeObject = _pressedPath != null
-                            ? AssetDatabase.LoadMainAssetAtPath(_pressedPath)
+                            ? ResolveRow(_pressedPath)
                             : null;
                         if (_pressedPath != null) _selectionAnchor = _pressedPath;
                         host.Repaint?.Invoke();
@@ -367,6 +429,17 @@ namespace Yozolab.Tabstep
             // Duplicate/Delete/Cut/Copy/Paste commands to the TREE selection (the
             // shown folder) instead of the assets selected here.
             GUIUtility.keyboardControl = 0;
+
+            // A click on a row's foldout triangle only toggles the sub-asset list —
+            // it never selects, opens or starts a drag.
+            if (e.button == 0 && HitFoldout(e.mousePosition, lay, out string foldPath))
+            {
+                if (!_expanded.Remove(foldPath)) _expanded.Add(foldPath);
+                _expandStamp++;
+                host.Repaint?.Invoke();
+                e.Use();
+                return;
+            }
 
             var path = HitTest(e.mousePosition, lay, out bool isFolder);
 
@@ -405,7 +478,7 @@ namespace Yozolab.Tabstep
             {
                 if (path != null && !IsSelected(path))
                 {
-                    Selection.activeObject = AssetDatabase.LoadMainAssetAtPath(path);
+                    Selection.activeObject = ResolveRow(path);
                     _selectionAnchor = path;
                 }
                 // Empty-area right-click intentionally leaves Selection untouched —
@@ -437,6 +510,10 @@ namespace Yozolab.Tabstep
                 var ping = PingTracker.Active(out float pingProgress);
                 _pingPath = ping;
                 _pingAlpha = ping != null ? PingAlpha(pingProgress) : 0f;
+                // A pinged sub-asset resolves to its parent's path; when its own row
+                // is on screen (parent unfolded), flash that row instead.
+                if (ping != null && FindItem(SubKey(PingTracker.InstanceID), out _, out _))
+                    _pingPath = SubKey(PingTracker.InstanceID);
 
                 EditorGUI.DrawRect(listRect, BgColor);
 
@@ -446,7 +523,7 @@ namespace Yozolab.Tabstep
                 }
                 else
                 {
-                    var selected = SelectedPaths();
+                    var selected = SelectedKeys();
                     var offset = new Vector2(-_scroll.x, -_scroll.y);
                     GUI.BeginClip(lay.Viewport);
                     for (int ci = 0; ci < _columns.Count; ci++)
@@ -460,7 +537,8 @@ namespace Yozolab.Tabstep
                         {
                             float y = HeaderHeight + Padding + ii * RowHeight + offset.y;
                             if (y >= lay.Viewport.height || y + RowHeight <= 0) continue; // off-screen row
-                            DrawRow(new Rect(colX, y, ColumnWidth, RowHeight), col.Items[ii], selected);
+                            DrawRow(new Rect(colX, y, ColumnWidth, RowHeight), col.Items[ii], selected,
+                                col.HasFoldouts);
                         }
                     }
                     GUI.EndClip();
@@ -480,11 +558,15 @@ namespace Yozolab.Tabstep
         {
             EditorGUI.DrawRect(r, HeaderColor);
             EditorGUI.DrawRect(new Rect(r.x, r.yMax - 1, r.width, 1), DividerColor);
+            // Sub-asset rows do not count — the header keeps the folder's own tally.
+            int count = 0;
+            foreach (var it in col.Items)
+                if (it.InstanceID == 0) count++;
             GUI.Label(new Rect(r.x + 5, r.y, r.width - 8, r.height),
-                $"{col.Label}  ({col.Items.Count})", HeaderStyle);
+                $"{col.Label}  ({count})", HeaderStyle);
         }
 
-        void DrawRow(Rect r, Item item, HashSet<string> selected)
+        void DrawRow(Rect r, Item item, HashSet<string> selected, bool gutter)
         {
             bool isSelected = selected.Contains(item.Path);
             bool isPing = _pingAlpha > 0.001f && item.Path == _pingPath;
@@ -499,12 +581,20 @@ namespace Yozolab.Tabstep
             // Ping flash tint, under the icon/label so they stay readable.
             if (isPing) EditorGUI.DrawRect(r, new Color(PingColor.r, PingColor.g, PingColor.b, _pingAlpha * 0.5f));
 
+            if (item.HasSub)
+            {
+                var foldRect = new Rect(r.x + 1, r.y + (r.height - 13f) / 2f, 13f, 13f);
+                EditorStyles.foldout.Draw(foldRect, false, false, item.Expanded, false);
+            }
+
+            float indent = (gutter ? FoldoutWidth : 0f) + (item.InstanceID != 0 ? SubIndent : 0f);
+
             // A brand-new asset has no AssetDatabase entry yet; fall back to the
             // preview icon Unity passed with BeginPreimportedNameEditing.
-            Texture icon = AssetDatabase.GetCachedIcon(item.Path);
+            Texture icon = item.InstanceID != 0 ? item.Icon : AssetDatabase.GetCachedIcon(item.Path);
             if (icon == null && _creation != null && item.Path == _creation.PathName)
                 icon = _creation.Icon;
-            var iconRect = new Rect(r.x + 4, r.y + (r.height - IconSize) / 2, IconSize, IconSize);
+            var iconRect = new Rect(r.x + 4 + indent, r.y + (r.height - IconSize) / 2, IconSize, IconSize);
             if (icon != null) GUI.DrawTexture(iconRect, icon, ScaleMode.ScaleToFit);
 
             // The row being renamed has its label replaced by the rename text field overlay.
@@ -516,13 +606,20 @@ namespace Yozolab.Tabstep
             if (isPing) DrawBorder(r, new Color(PingColor.r, PingColor.g, PingColor.b, _pingAlpha));
         }
 
-        static HashSet<string> SelectedPaths()
+        /// <summary>
+        /// Row keys of the current selection: paths for main assets, sub keys for
+        /// selected sub-assets (whose <see cref="AssetDatabase.GetAssetPath(Object)"/>
+        /// would alias their parent's path and wrongly highlight the parent row).
+        /// </summary>
+        static HashSet<string> SelectedKeys()
         {
             var set = new HashSet<string>();
             foreach (var o in Selection.objects)
             {
                 var p = AssetDatabase.GetAssetPath(o);
-                if (!string.IsNullOrEmpty(p)) set.Add(p);
+                if (string.IsNullOrEmpty(p)) continue;
+                if (AssetDatabase.IsMainAsset(o)) set.Add(p);
+                else set.Add(SubKey(o.GetInstanceID()));
             }
             return set;
         }
@@ -619,8 +716,8 @@ namespace Yozolab.Tabstep
             // columns) the first arrow press just lands on (0,0), like the stock
             // browser's first Down/Right into an unfocused list.
             int ci = -1, ii = -1;
-            var activePath = AssetDatabase.GetAssetPath(Selection.activeObject);
-            bool hasAnchor = !string.IsNullOrEmpty(activePath) && FindItem(activePath, out ci, out ii);
+            var activeKey = ActiveKey();
+            bool hasAnchor = activeKey != null && FindItem(activeKey, out ci, out ii);
             int newCi, newIi;
             if (!hasAnchor)
             {
@@ -662,7 +759,7 @@ namespace Yozolab.Tabstep
             if (newCi == ci && newIi == ii) return true; // already there — consume but no-op
 
             string newPath = _columns[newCi].Items[newIi].Path;
-            var obj = AssetDatabase.LoadMainAssetAtPath(newPath);
+            var obj = ResolveRow(newPath);
             if (obj == null) return true; // phantom row or missing asset — swallow but no selection change
 
             if (e.shift)
@@ -689,9 +786,9 @@ namespace Yozolab.Tabstep
         /// </summary>
         bool OpenActiveSelection(Host host)
         {
-            var path = AssetDatabase.GetAssetPath(Selection.activeObject);
-            if (string.IsNullOrEmpty(path) || !FindItem(path, out _, out _)) return false;
-            OpenItem(path, AssetDatabase.IsValidFolder(path), host);
+            var key = ActiveKey();
+            if (key == null || !FindItem(key, out _, out _)) return false;
+            OpenItem(key, !IsSubKey(key) && AssetDatabase.IsValidFolder(key), host);
             return true;
         }
 
@@ -705,6 +802,10 @@ namespace Yozolab.Tabstep
             var paths = new List<string>();
             foreach (var o in Selection.objects)
             {
+                // A sub-asset has no file of its own to trash — its path would be the
+                // parent's, and deleting THAT because a mesh row was selected would
+                // silently destroy the whole FBX.
+                if (!AssetDatabase.IsMainAsset(o)) continue;
                 var p = AssetDatabase.GetAssetPath(o);
                 if (!string.IsNullOrEmpty(p)) paths.Add(p);
             }
@@ -760,7 +861,9 @@ namespace Yozolab.Tabstep
             foreach (var obj in Selection.objects)
             {
                 var path = AssetDatabase.GetAssetPath(obj);
-                if (!string.IsNullOrEmpty(path) && FindItem(path, out _, out _)) return true;
+                if (string.IsNullOrEmpty(path)) continue;
+                var key = AssetDatabase.IsMainAsset(obj) ? path : SubKey(obj.GetInstanceID());
+                if (FindItem(key, out _, out _)) return true;
             }
             return false;
         }
@@ -829,16 +932,18 @@ namespace Yozolab.Tabstep
         bool BeginRename()
         {
             string target = null;
-            var active = AssetDatabase.GetAssetPath(Selection.activeObject);
-            if (!string.IsNullOrEmpty(active) && FindItem(active, out _, out _))
+            var active = ActiveKey();
+            // Sub-asset rows are skipped: their names come from the parent's importer
+            // (or its internal objects), not from a file the database could rename.
+            if (active != null && !IsSubKey(active) && FindItem(active, out _, out _))
             {
                 target = active;
             }
             else
             {
-                var selected = SelectedPaths();
+                var selected = SelectedKeys();
                 foreach (var path in FlattenedPaths())
-                    if (selected.Contains(path)) { target = path; break; }
+                    if (!IsSubKey(path) && selected.Contains(path)) { target = path; break; }
             }
             if (target == null) return false;
 
@@ -868,8 +973,11 @@ namespace Yozolab.Tabstep
             var rowRect = new Rect(colX, y, ColumnWidth, RowHeight);
             if (!lay.Viewport.Overlaps(rowRect)) return; // scrolled out of view this frame
 
-            var fieldRect = new Rect(rowRect.x + IconSize + 8, rowRect.y + 1,
-                Mathf.Max(20f, rowRect.width - IconSize - 12), rowRect.height - 2);
+            // Renameable rows are never sub-assets, but their column may still carry
+            // the foldout gutter — keep the field aligned with the shifted label.
+            float indent = _columns[ci].HasFoldouts ? FoldoutWidth : 0f;
+            var fieldRect = new Rect(rowRect.x + indent + IconSize + 8, rowRect.y + 1,
+                Mathf.Max(20f, rowRect.width - indent - IconSize - 12), rowRect.height - 2);
 
             GUI.SetNextControlName(RenameControlName);
             _renameText = GUI.TextField(fieldRect, _renameText ?? string.Empty, RenameStyle);
@@ -1070,12 +1178,35 @@ namespace Yozolab.Tabstep
         /// While an asset ping is alive, keep repainting (so the flash animates) and, once per
         /// ping, scroll the pinged item into view — matching the stock list's behaviour.
         /// </summary>
-        void HandlePing(Layout lay, Host host)
+        void HandlePing(Rect listRect, ref Layout lay, Host host)
         {
             var path = PingTracker.Active(out _);
             if (path == null) return;
             host.Repaint?.Invoke();
-            if (PingTracker.StartTime != _pingScrolled && FindItem(path, out int ci, out int ii))
+            if (PingTracker.StartTime == _pingScrolled) return;
+
+            // A pinged sub-asset targets its own row. When it hides under a collapsed
+            // parent shown here, unfold the parent first — the stock list does the
+            // same when it frames a sub-asset.
+            string subKey = SubKey(PingTracker.InstanceID);
+            bool found = FindItem(subKey, out int ci, out int ii);
+            if (!found && FindItem(path, out int pci, out int pii))
+            {
+                var parent = _columns[pci].Items[pii];
+                var pinged = EditorUtility.InstanceIDToObject(PingTracker.InstanceID);
+                if (parent.HasSub && pinged != null && !AssetDatabase.IsMainAsset(pinged) &&
+                    _expanded.Add(path))
+                {
+                    _expandStamp++;
+                    EnsureBuilt(_builtFolder, _builtKey, _builtDescending);
+                    // The unfold grew the content — remeasure before scrolling so the
+                    // clamp does not stop short of the freshly inserted rows.
+                    lay = Measure(listRect);
+                    found = FindItem(subKey, out ci, out ii);
+                }
+                if (!found) { found = true; ci = pci; ii = pii; } // settle for the parent row
+            }
+            if (found)
             {
                 _pingScrolled = PingTracker.StartTime;
                 ScrollItemIntoView(ci, ii, lay);
@@ -1115,25 +1246,47 @@ namespace Yozolab.Tabstep
             return Mathf.Clamp01(a);
         }
 
-        /// <summary>Resolves the path under <paramref name="mouse"/> (window coords), or null.</summary>
+        /// <summary>Resolves the row key under <paramref name="mouse"/> (window coords), or null.</summary>
         string HitTest(Vector2 mouse, Layout lay, out bool isFolder)
         {
             isFolder = false;
+            if (!HitTestIndex(mouse, lay, out int ci, out int ii, out _)) return null;
+            var path = _columns[ci].Items[ii].Path;
+            isFolder = !IsSubKey(path) && AssetDatabase.IsValidFolder(path);
+            return path;
+        }
+
+        /// <summary>
+        /// True when <paramref name="mouse"/> sits on a row's foldout triangle (the
+        /// arrow gutter of a row that has sub-assets); outputs that row's asset path.
+        /// </summary>
+        bool HitFoldout(Vector2 mouse, Layout lay, out string path)
+        {
+            path = null;
+            if (!HitTestIndex(mouse, lay, out int ci, out int ii, out float localX)) return false;
+            var item = _columns[ci].Items[ii];
+            if (!item.HasSub || localX > FoldoutWidth + 2f) return false;
+            path = item.Path;
+            return true;
+        }
+
+        /// <summary>Row under <paramref name="mouse"/> as column/item indices plus the x offset into the row.</summary>
+        bool HitTestIndex(Vector2 mouse, Layout lay, out int ci, out int ii, out float localX)
+        {
+            ci = -1;
+            ii = -1;
+            localX = 0;
             var content = (mouse - lay.Viewport.position) + _scroll;
-            if (content.x < Padding || content.y < HeaderHeight + Padding) return null;
+            if (content.x < Padding || content.y < HeaderHeight + Padding) return false;
 
             float stride = ColumnWidth + ColumnGap;
-            int ci = Mathf.FloorToInt((content.x - Padding) / stride);
-            if (ci < 0 || ci >= _columns.Count) return null;
-            if ((content.x - Padding) - ci * stride > ColumnWidth) return null; // in the gap between columns
+            ci = Mathf.FloorToInt((content.x - Padding) / stride);
+            if (ci < 0 || ci >= _columns.Count) return false;
+            localX = (content.x - Padding) - ci * stride;
+            if (localX > ColumnWidth) return false; // in the gap between columns
 
-            int ii = Mathf.FloorToInt((content.y - HeaderHeight - Padding) / RowHeight);
-            var col = _columns[ci];
-            if (ii < 0 || ii >= col.Items.Count) return null;
-
-            var path = col.Items[ii].Path;
-            isFolder = AssetDatabase.IsValidFolder(path);
-            return path;
+            ii = Mathf.FloorToInt((content.y - HeaderHeight - Padding) / RowHeight);
+            return ii >= 0 && ii < _columns[ci].Items.Count;
         }
 
         (Rect track, Rect thumb) ThumbRects(Layout lay, bool horizontal)
@@ -1192,16 +1345,23 @@ namespace Yozolab.Tabstep
 
         // ---- selection / open / drag ---------------------------------------------
 
-        static bool IsSelected(string path)
+        static bool IsSelected(string key)
         {
+            if (IsSubKey(key))
+            {
+                int id = SubKeyInstanceID(key);
+                foreach (var o in Selection.objects)
+                    if (o != null && o.GetInstanceID() == id) return true;
+                return false;
+            }
             foreach (var o in Selection.objects)
-                if (AssetDatabase.GetAssetPath(o) == path) return true;
+                if (AssetDatabase.GetAssetPath(o) == key && AssetDatabase.IsMainAsset(o)) return true;
             return false;
         }
 
         void ApplyClickSelection(string path, Event e)
         {
-            var obj = AssetDatabase.LoadMainAssetAtPath(path);
+            var obj = ResolveRow(path);
             if (obj == null) return;
             bool additive = e.control || e.command;
 
@@ -1255,7 +1415,7 @@ namespace Yozolab.Tabstep
                 objs.AddRange(Selection.objects);
             for (int i = lo; i <= hi; i++)
             {
-                var o = AssetDatabase.LoadMainAssetAtPath(order[i]);
+                var o = ResolveRow(order[i]);
                 if (o != null && !objs.Contains(o)) objs.Add(o);
             }
             Selection.objects = objs.ToArray();
@@ -1274,26 +1434,35 @@ namespace Yozolab.Tabstep
         static void OpenItem(string path, bool isFolder, Host host)
         {
             if (isFolder) { host.OpenFolder?.Invoke(path); return; }
-            var obj = AssetDatabase.LoadMainAssetAtPath(path);
+            var obj = ResolveRow(path);
             if (obj != null) AssetDatabase.OpenAsset(obj);
         }
 
-        static void StartAssetDrag(string path)
+        static void StartAssetDrag(string key)
         {
             var paths = new List<string>();
             var objs = new List<Object>();
-            if (IsSelected(path))
+            if (IsSelected(key))
             {
                 foreach (var o in Selection.objects)
                 {
                     var p = AssetDatabase.GetAssetPath(o);
-                    if (!string.IsNullOrEmpty(p)) { paths.Add(p); objs.Add(o); }
+                    if (string.IsNullOrEmpty(p)) continue;
+                    objs.Add(o);
+                    // Like the stock browser, only main assets contribute a path — a
+                    // sub-asset's path is its parent's, and listing it would turn a
+                    // folder drop of a mesh row into a move of the whole FBX.
+                    if (AssetDatabase.IsMainAsset(o)) paths.Add(p);
                 }
             }
             if (objs.Count == 0)
             {
-                var obj = AssetDatabase.LoadMainAssetAtPath(path);
-                if (obj != null) { paths.Add(path); objs.Add(obj); }
+                var obj = ResolveRow(key);
+                if (obj != null)
+                {
+                    objs.Add(obj);
+                    if (!IsSubKey(key)) paths.Add(key);
+                }
             }
             if (objs.Count == 0) return;
             DragAndDrop.PrepareStartDrag();
@@ -1363,7 +1532,8 @@ namespace Yozolab.Tabstep
             }
             foreach (var obj in DragAndDrop.objectReferences)
             {
-                if (obj == null) continue;
+                // A sub-asset's path aliases its parent's file — never a move candidate.
+                if (obj == null || !AssetDatabase.IsMainAsset(obj)) continue;
                 var path = AssetDatabase.GetAssetPath(obj);
                 if (string.IsNullOrEmpty(path) || !seen.Add(path)) continue;
                 result.Add(path);
@@ -1432,7 +1602,8 @@ namespace Yozolab.Tabstep
         {
             string creationPath = CreationPathFor(folder);
             if (folder == _builtFolder && key == _builtKey && descending == _builtDescending &&
-                _builtVersion == ProjectVersion && creationPath == _builtCreationPath)
+                _builtVersion == ProjectVersion && creationPath == _builtCreationPath &&
+                _builtExpandStamp == _expandStamp)
                 return;
 
             // Reset the scroll and range anchor when the shown folder changes.
@@ -1448,8 +1619,13 @@ namespace Yozolab.Tabstep
             _builtDescending = descending;
             _builtVersion = ProjectVersion;
             _builtCreationPath = creationPath;
+            _builtExpandStamp = _expandStamp;
             _columns.Clear();
             if (string.IsNullOrEmpty(folder)) return;
+
+            var hasSubs = new HashSet<string>();
+            var subRows = new Dictionary<string, List<Item>>();
+            ScanSubAssets(folder, hasSubs, subRows);
 
             var byLabel = new Dictionary<string, Column>();
             foreach (var path in EnumerateChildren(folder))
@@ -1464,6 +1640,12 @@ namespace Yozolab.Tabstep
                 }
                 var item = new Item { Path = path, Name = Path.GetFileNameWithoutExtension(path) };
                 FillMeta(ref item, path, isFolder);
+                if (!isFolder && (hasSubs.Contains(path) || HasHiddenSubAssets(path)))
+                {
+                    item.HasSub = true;
+                    item.Expanded = _expanded.Contains(path);
+                    col.HasFoldouts = true;
+                }
                 col.Items.Add(item);
             }
 
@@ -1501,6 +1683,132 @@ namespace Yozolab.Tabstep
             });
             foreach (var col in _columns)
                 col.Items.Sort((a, b) => CompareItems(a, b, key, descending));
+
+            // Splice each unfolded parent's sub-asset rows in right under it — after
+            // the sort, so they stay glued to the parent whatever the sort key. The
+            // stock browser orders sub-assets by natural name; match it.
+            foreach (var col in _columns)
+            {
+                if (!col.HasFoldouts) continue;
+                for (int i = 0; i < col.Items.Count; i++)
+                {
+                    if (!col.Items[i].Expanded) continue;
+                    if (!subRows.TryGetValue(col.Items[i].Path, out var subs))
+                        subs = HasHiddenSubAssets(col.Items[i].Path)
+                            ? HiddenSubRows(col.Items[i].Path)
+                            : new List<Item>();
+                    subs.Sort((a, b) => NaturalCompare(a.Name, b.Name));
+                    col.Items.InsertRange(i + 1, subs);
+                    i += subs.Count;
+                }
+            }
+        }
+
+        // ---- sub-assets ----------------------------------------------------------
+
+        // AssetDatabase.GetMainAssetOrInProgressProxyInstanceID — internal, but the
+        // only way to resolve a folder that has no loadable main asset (the "Assets"
+        // root) to the instance id HierarchyProperty needs in its expanded set. The
+        // stock browser's FilteredHierarchy.FolderBrowsing makes the same call.
+        static readonly MethodInfo MainAssetInstanceID = typeof(AssetDatabase).GetMethod(
+            "GetMainAssetOrInProgressProxyInstanceID", BindingFlags.NonPublic | BindingFlags.Static);
+
+        /// <summary>
+        /// One native sweep over <paramref name="folder"/>'s immediate children,
+        /// mirroring the stock browser's FilteredHierarchy.FolderBrowsing: fills
+        /// <paramref name="hasSubs"/> with the files that own visible sub-assets (the
+        /// stock foldout condition — hasChildren on a non-folder) and, for parents
+        /// currently unfolded, their sub-asset rows into <paramref name="subRows"/>.
+        /// HierarchyProperty streams all of it straight from the asset database, so
+        /// no asset gets loaded.
+        /// </summary>
+        void ScanSubAssets(string folder, HashSet<string> hasSubs, Dictionary<string, List<Item>> subRows)
+        {
+            try
+            {
+                var property = new HierarchyProperty(folder);
+                int folderDepth = property.depth;
+                int folderID = FolderInstanceID(folder, property);
+                if (folderID == 0) return; // virtual root (e.g. "Packages") — only folders live there
+                var expanded = new[] { folderID };
+                List<Item> openSubs = null; // rows of the unfolded parent currently streaming
+                while (property.Next(expanded))
+                {
+                    if (property.depth <= folderDepth) break; // stepped out of the folder
+                    if (property.isFolder) continue;
+                    if (!property.isMainRepresentation)
+                    {
+                        // Sub-assets follow directly after their (unfolded) parent.
+                        openSubs?.Add(new Item
+                        {
+                            Path = SubKey(property.instanceID),
+                            Name = property.name,
+                            InstanceID = property.instanceID,
+                            Icon = property.icon,
+                        });
+                        continue;
+                    }
+                    openSubs = null;
+                    if (!property.hasChildren) continue;
+                    string path = AssetDatabase.GUIDToAssetPath(property.guid);
+                    if (string.IsNullOrEmpty(path)) continue;
+                    hasSubs.Add(path);
+                    if (_expanded.Contains(path))
+                    {
+                        subRows[path] = openSubs = new List<Item>();
+                        Array.Resize(ref expanded, expanded.Length + 1);
+                        expanded[expanded.Length - 1] = property.instanceID;
+                    }
+                }
+            }
+            catch
+            {
+                // Best-effort: on any editor quirk the foldouts simply don't appear.
+            }
+        }
+
+        static int FolderInstanceID(string folder, HierarchyProperty property)
+        {
+            if (MainAssetInstanceID != null)
+            {
+                try { return (int)MainAssetInstanceID.Invoke(null, new object[] { folder }); }
+                catch { }
+            }
+            var asset = AssetDatabase.LoadMainAssetAtPath(folder);
+            if (asset != null) return asset.GetInstanceID();
+            return property.instanceID; // a fresh property sits on its root
+        }
+
+        /// <summary>
+        /// True for container assets whose sub-objects are hidden from the asset
+        /// hierarchy and so never get a foldout from <see cref="ScanSubAssets"/>:
+        /// an AnimatorController's state machines, states and blend trees all carry
+        /// HideFlags.HideInHierarchy.
+        /// </summary>
+        static bool HasHiddenSubAssets(string path) =>
+            AssetDatabase.GetMainAssetTypeAtPath(path) == typeof(AnimatorController);
+
+        /// <summary>
+        /// Sub-asset rows of a hidden-container parent. This one does load the file's
+        /// objects — acceptable because it only ever runs for a parent the user
+        /// explicitly unfolded. Unnamed objects (transitions and other wiring) are
+        /// noise, not content — skipped.
+        /// </summary>
+        static List<Item> HiddenSubRows(string path)
+        {
+            var rows = new List<Item>();
+            foreach (var o in AssetDatabase.LoadAllAssetsAtPath(path))
+            {
+                if (o == null || AssetDatabase.IsMainAsset(o) || string.IsNullOrEmpty(o.name)) continue;
+                rows.Add(new Item
+                {
+                    Path = SubKey(o.GetInstanceID()),
+                    Name = o.name,
+                    InstanceID = o.GetInstanceID(),
+                    Icon = AssetPreview.GetMiniThumbnail(o),
+                });
+            }
+            return rows;
         }
 
         /// <summary>
