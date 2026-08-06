@@ -3,7 +3,6 @@ using System.Collections.Generic;
 using System.IO;
 using System.Reflection;
 using UnityEditor;
-using UnityEditor.Animations;
 using UnityEngine;
 using Object = UnityEngine.Object;
 
@@ -167,9 +166,10 @@ namespace Yozolab.Tabstep
         // across). Cleared when the shown folder changes.
         string _selectionAnchor;
 
-        // Inline rename overlay (F2), mirroring the stock browser: a text field drawn over
-        // the selected row's label that commits on Enter / focus loss, cancels on Escape,
-        // keeps the file extension, and reselects the renamed asset. Null path = not renaming.
+        // Inline rename overlay (F2 on Windows/Linux, Return on macOS), mirroring the stock
+        // browser: a text field drawn over the selected row's label that commits on Enter /
+        // focus loss, cancels on Escape, keeps the file extension, and reselects the renamed
+        // asset. Null path = not renaming.
         const string RenameControlName = "TabstepColumnRename";
         string _renamePath;
         string _renameText;
@@ -356,21 +356,35 @@ namespace Yozolab.Tabstep
                         }
                         string dropTo = hoveredFolder ?? folder;
                         var sceneRoots = CollectSceneRootsForPrefab();
-                        var draggedPaths = CollectDraggedAssetPaths();
+                        // A drag from outside the project (Finder/Explorer, a .unitypackage
+                        // double-click-and-drag) never touched the AssetDatabase, so it carries
+                        // OS paths but no object references — unlike a drag of existing project
+                        // assets, which always populates objectReferences too. Without this
+                        // check those OS paths fell into CollectDraggedAssetPaths/
+                        // HasMoveableAssetInto below, which — having no notion of "not a project
+                        // asset yet" — happily called AssetDatabase.MoveAsset on a source path it
+                        // can never find, silently swallowing the drop instead of importing it.
+                        bool isExternalFileDrag = sceneRoots.Count == 0
+                            && DragAndDrop.objectReferences.Length == 0
+                            && DragAndDrop.paths.Length > 0;
+                        var draggedPaths = isExternalFileDrag ? null : CollectDraggedAssetPaths();
                         bool willCreatePrefabs = sceneRoots.Count > 0
                             && !string.IsNullOrEmpty(dropTo)
                             && AssetDatabase.IsValidFolder(dropTo);
-                        bool willMoveAssets = !willCreatePrefabs
+                        bool willImportExternal = !willCreatePrefabs && isExternalFileDrag
+                            && !string.IsNullOrEmpty(dropTo) && AssetDatabase.IsValidFolder(dropTo);
+                        bool willMoveAssets = !willCreatePrefabs && !willImportExternal
                             && HasMoveableAssetInto(dropTo, draggedPaths);
-                        if (willCreatePrefabs || willMoveAssets)
+                        if (willCreatePrefabs || willImportExternal || willMoveAssets)
                         {
-                            DragAndDrop.visualMode = willCreatePrefabs
-                                ? DragAndDropVisualMode.Copy
-                                : DragAndDropVisualMode.Move;
+                            DragAndDrop.visualMode = willMoveAssets
+                                ? DragAndDropVisualMode.Move
+                                : DragAndDropVisualMode.Copy;
                             if (e.type == EventType.DragPerform)
                             {
                                 DragAndDrop.AcceptDrag();
                                 if (willCreatePrefabs) CreatePrefabsInto(dropTo, sceneRoots);
+                                else if (willImportExternal) ImportExternalFilesInto(dropTo, DragAndDrop.paths);
                                 else MoveAssetsInto(dropTo, draggedPaths);
                                 _dropFolder = null;
                             }
@@ -631,7 +645,7 @@ namespace Yozolab.Tabstep
             EditorGUI.DrawRect(thumb, ThumbColor);
         }
 
-        // ---- inline rename (F2) --------------------------------------------------
+        // ---- inline rename (F2 on Windows/Linux, Return on macOS) ----------------
 
         void HandleKeyDown(Event e, Layout lay, Host host)
         {
@@ -653,7 +667,13 @@ namespace Yozolab.Tabstep
                 return;
             }
 
-            if (e.keyCode == KeyCode.F2)
+            // Rename shortcut: F2 on Windows/Linux, Return on macOS — matching Unity's own
+            // stock browser and Finder conventions on each platform.
+            bool isMac = Application.platform == RuntimePlatform.OSXEditor;
+            bool renameKey = isMac
+                ? (e.keyCode == KeyCode.Return || e.keyCode == KeyCode.KeypadEnter)
+                : e.keyCode == KeyCode.F2;
+            if (renameKey)
             {
                 if (BeginRename())
                 {
@@ -671,7 +691,8 @@ namespace Yozolab.Tabstep
             // Enter opens the active selection (folder navigates, asset opens) — the stock
             // browser's behaviour, which never reached the covered list. Always consume it so
             // the hidden browser underneath never also reacts (the core invariant of this view).
-            if (e.keyCode == KeyCode.Return || e.keyCode == KeyCode.KeypadEnter)
+            // macOS claims Return for rename above (see renameKey) instead, matching Finder.
+            if (!isMac && (e.keyCode == KeyCode.Return || e.keyCode == KeyCode.KeypadEnter))
             {
                 OpenActiveSelection(host);
                 e.Use();
@@ -1517,6 +1538,39 @@ namespace Yozolab.Tabstep
         }
 
         /// <summary>
+        /// Imports files dragged in from outside the project (Finder/Explorer) into
+        /// <paramref name="folder"/> — the stock browser's behaviour for a drop that never
+        /// touched the AssetDatabase. A .unitypackage is unpacked through the normal import
+        /// dialog rather than copied in as a literal file, matching a double-click.
+        /// </summary>
+        static void ImportExternalFilesInto(string folder, string[] externalPaths)
+        {
+            bool copiedAny = false;
+            foreach (var src in externalPaths)
+            {
+                if (string.IsNullOrEmpty(src) || !File.Exists(src)) continue;
+                if (string.Equals(Path.GetExtension(src), ".unitypackage", StringComparison.OrdinalIgnoreCase))
+                {
+                    AssetDatabase.ImportPackage(src, true);
+                    continue;
+                }
+                string destPath = AssetDatabase.GenerateUniqueAssetPath(folder + "/" + Path.GetFileName(src));
+                string destAbs = AbsolutePath(destPath);
+                if (destAbs == null) continue;
+                try
+                {
+                    File.Copy(src, destAbs);
+                    copiedAny = true;
+                }
+                catch (Exception e)
+                {
+                    Debug.LogWarning($"Tabstep: could not import \"{src}\" into \"{folder}\": {e}");
+                }
+            }
+            if (copiedAny) AssetDatabase.Refresh();
+        }
+
+        /// <summary>
         /// Asset paths of the current drag, unioned from <see cref="DragAndDrop.paths"/>
         /// and <see cref="DragAndDrop.objectReferences"/> — the stock browser's tree pane
         /// only populates the latter, so reading just paths missed tree drags.
@@ -1640,7 +1694,7 @@ namespace Yozolab.Tabstep
                 }
                 var item = new Item { Path = path, Name = Path.GetFileNameWithoutExtension(path) };
                 FillMeta(ref item, path, isFolder);
-                if (!isFolder && (hasSubs.Contains(path) || HasHiddenSubAssets(path)))
+                if (!isFolder && hasSubs.Contains(path))
                 {
                     item.HasSub = true;
                     item.Expanded = _expanded.Contains(path);
@@ -1694,9 +1748,7 @@ namespace Yozolab.Tabstep
                 {
                     if (!col.Items[i].Expanded) continue;
                     if (!subRows.TryGetValue(col.Items[i].Path, out var subs))
-                        subs = HasHiddenSubAssets(col.Items[i].Path)
-                            ? HiddenSubRows(col.Items[i].Path)
-                            : new List<Item>();
+                        subs = new List<Item>();
                     subs.Sort((a, b) => NaturalCompare(a.Name, b.Name));
                     col.Items.InsertRange(i + 1, subs);
                     i += subs.Count;
@@ -1777,38 +1829,6 @@ namespace Yozolab.Tabstep
             var asset = AssetDatabase.LoadMainAssetAtPath(folder);
             if (asset != null) return asset.GetInstanceID();
             return property.instanceID; // a fresh property sits on its root
-        }
-
-        /// <summary>
-        /// True for container assets whose sub-objects are hidden from the asset
-        /// hierarchy and so never get a foldout from <see cref="ScanSubAssets"/>:
-        /// an AnimatorController's state machines, states and blend trees all carry
-        /// HideFlags.HideInHierarchy.
-        /// </summary>
-        static bool HasHiddenSubAssets(string path) =>
-            AssetDatabase.GetMainAssetTypeAtPath(path) == typeof(AnimatorController);
-
-        /// <summary>
-        /// Sub-asset rows of a hidden-container parent. This one does load the file's
-        /// objects — acceptable because it only ever runs for a parent the user
-        /// explicitly unfolded. Unnamed objects (transitions and other wiring) are
-        /// noise, not content — skipped.
-        /// </summary>
-        static List<Item> HiddenSubRows(string path)
-        {
-            var rows = new List<Item>();
-            foreach (var o in AssetDatabase.LoadAllAssetsAtPath(path))
-            {
-                if (o == null || AssetDatabase.IsMainAsset(o) || string.IsNullOrEmpty(o.name)) continue;
-                rows.Add(new Item
-                {
-                    Path = SubKey(o.GetInstanceID()),
-                    Name = o.name,
-                    InstanceID = o.GetInstanceID(),
-                    Icon = AssetPreview.GetMiniThumbnail(o),
-                });
-            }
-            return rows;
         }
 
         /// <summary>
