@@ -98,6 +98,18 @@ namespace Yozolab.Tabstep
             set => EditorPrefs.SetBool(Prefix + "ColumnViewFolderDrop", value);
         }
 
+        /// <summary>
+        /// Replace Unity's "Show in Explorer" / "Reveal in Finder" entry in the Assets menu
+        /// with one that opens a folder instead of selecting it inside its parent, and that
+        /// falls back to the folder the Project window shows when nothing is selected.
+        /// See <see cref="ShowInExplorerMenu"/>.
+        /// </summary>
+        public static bool ShowInExplorerOpensFolders
+        {
+            get => EditorPrefs.GetBool(Prefix + "ShowInExplorerOpensFolders", true);
+            set => EditorPrefs.SetBool(Prefix + "ShowInExplorerOpensFolders", value);
+        }
+
         public static void ResetAll()
         {
             string[] keys =
@@ -105,6 +117,7 @@ namespace Yozolab.Tabstep
                 "NewTabFolder", "MiddleClickClosesTab", "ShowNavigationBar", "MaxTabTitleLength",
                 "PingOpensNewTab", "MouseSideButtonsNavigate", "NewTabBesideActive", "ShelfOneShot",
                 "ShowStatusBar", "ColumnViewFolderDrop", "EqualWidthTabs",
+                "ShowInExplorerOpensFolders",
             };
             foreach (var key in keys)
                 EditorPrefs.DeleteKey(Prefix + key);
@@ -194,6 +207,19 @@ namespace Yozolab.Tabstep
                     "them into it. Off by default — drags over the view are otherwise ignored so " +
                     "they pass through to the scene, object fields and the folder tree."),
                 TabstepSettings.ColumnViewFolderDrop);
+            var revealOpensFolders = EditorGUILayout.Toggle(
+                new GUIContent("Reveal Opens Folders",
+                    "Make Unity's \"Show in Explorer\" / \"Reveal in Finder\" entry OPEN a folder — " +
+                    "its contents shown — instead of selecting it inside its parent, and act on the " +
+                    "folder the Project window shows when nothing is selected. Applies to every " +
+                    "Project window, Tabstep's and the stock one. Switching it off restores Unity's " +
+                    "own entry when the editor next starts."),
+                TabstepSettings.ShowInExplorerOpensFolders);
+            if (revealOpensFolders != TabstepSettings.ShowInExplorerOpensFolders)
+            {
+                TabstepSettings.ShowInExplorerOpensFolders = revealOpensFolders;
+                ShowInExplorerMenu.Apply();
+            }
             EditorGUI.indentLevel--;
 
             EditorGUILayout.Space(8);

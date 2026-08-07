@@ -399,7 +399,7 @@ namespace Yozolab.Tabstep
                 menu.AddItem(new GUIContent("Copy Path"), false,
                     () => EditorGUIUtility.systemCopyBuffer = tab.CurrentPath);
                 menu.AddItem(new GUIContent("Copy Absolute Path"), false,
-                    () => EditorGUIUtility.systemCopyBuffer = ToAbsolutePath(tab.CurrentPath));
+                    () => EditorGUIUtility.systemCopyBuffer = FileBrowser.ToAbsolutePath(tab.CurrentPath));
             }
             else
             {
