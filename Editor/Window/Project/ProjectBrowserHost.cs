@@ -503,6 +503,32 @@ namespace Yozolab.Tabstep
             }
         }
 
+        // internal static string ProjectWindowUtil.GetActiveFolderPath() — the folder the
+        // last interacted Project browser (stock or embedded) is showing, which is what an
+        // Assets menu command means by "this folder".
+        static readonly MethodInfo ProjectWindowUtilActiveFolderMethod =
+            typeof(ProjectWindowUtil).GetMethod("GetActiveFolderPath",
+                BindingFlags.Static | BindingFlags.NonPublic | BindingFlags.Public);
+
+        /// <summary>
+        /// Folder shown by the last interacted Project browser, or null when unknown.
+        /// On an embedded browser this comes back as the owning tab's folder — the
+        /// GetActiveFolderPath patch pins it there, and the column view marks its browser
+        /// as the last interacted one before opening the Assets context menu.
+        /// </summary>
+        internal static string GetLastInteractedFolderPath()
+        {
+            if (ProjectWindowUtilActiveFolderMethod == null) return null;
+            try
+            {
+                return ProjectPaths.Normalize(ProjectWindowUtilActiveFolderMethod.Invoke(null, null) as string);
+            }
+            catch
+            {
+                return null;
+            }
+        }
+
         /// <summary>Folder currently shown by the embedded browser, or null when unknown.</summary>
         public string GetActiveFolderPath()
         {

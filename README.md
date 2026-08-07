@@ -44,6 +44,12 @@ like the built-in Project window. On top of it, Tabstep adds:
   clones the whole window — every tab, pins and the active tab included.
 - **Undo asset moves** — moved something onto the wrong tab? *Undo Last Asset
   Move* in the tab / path-bar context menus puts everything back.
+- **Open the folder in Explorer** — a tab's context menu opens that tab's
+  folder in the OS file browser, and Unity's own *Show in Explorer* /
+  *Reveal in Finder* is rewired to **open** a folder (contents shown) instead
+  of selecting it inside its parent — with nothing selected it acts on the
+  folder you are browsing rather than the project root. Applies to stock
+  Project windows too; toggleable via the Reveal Opens Folders preference.
 - **Status bar** — item count of the shown folder plus the selection's count
   and file size at the bottom (toggleable).
 - **Explorer-style address bar** — back/forward/up buttons, the folder icon and
@@ -141,7 +147,7 @@ Open via `YozoLab > Tabstep`.
 | `Ctrl+Shift+D`                | Summon the shelf to the mouse and add the selection (global, rebindable)    |
 | Drag tab                      | Reorder tabs                                                                 |
 | Middle-click tab              | Close tab                                                                    |
-| Right-click tab               | Pin / quick access / shelf / close others / duplicate / copy & paste path    |
+| Right-click tab               | Open folder in Explorer / pin / quick access / shelf / close others / duplicate / copy & paste path |
 | Right-click `+`               | Quick Access menu                                                            |
 | Right-click `◀` / `▶`         | Full history dropdown                                                        |
 | Right-click path bar          | Copy path / copy absolute path / paste path / edit path                      |
@@ -149,7 +155,7 @@ Open via `YozoLab > Tabstep`.
 Preferences live under `Edit > Preferences > Yozolab > Tabstep`
 (new-tab folder, new-tab position, navigation bar, status bar, search filter
 chips, tab title length, middle-click close, mouse side buttons, ping
-behaviour, shelf one-shot).
+behaviour, reveal opens folders, shelf one-shot).
 
 ## Harmony (optional but recommended)
 
