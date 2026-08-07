@@ -454,7 +454,6 @@ namespace Yozolab.Tabstep
                 e.Use();
                 return;
             }
-
             var path = HitTest(e.mousePosition, lay, out bool isFolder);
 
             if (e.button == 0)
