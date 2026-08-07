@@ -36,17 +36,11 @@ namespace Yozolab.Tabstep
             return ProjectPaths.GetParent(path);
         }
 
-        static string ToAbsolutePath(string projectPath)
+        /// <summary>Menu action: opens the folder, or says so in-window when it is gone.</summary>
+        void OpenFolderOrNotify(string projectPath)
         {
-            try
-            {
-                // GetPhysicalPath resolves Packages/... into the real package location.
-                return Path.GetFullPath(FileUtil.GetPhysicalPath(projectPath));
-            }
-            catch
-            {
-                return projectPath;
-            }
+            if (FileBrowser.OpenFolder(projectPath)) return;
+            ShowNotification(new GUIContent("Folder not found:\n" + (ProjectPaths.Normalize(projectPath) ?? "")));
         }
 
         /// <summary>Pings after the next sync so the embedded browser already shows the folder.</summary>

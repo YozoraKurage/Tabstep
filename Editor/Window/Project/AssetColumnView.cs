@@ -500,7 +500,9 @@ namespace Yozolab.Tabstep
                 // destination to the active tab's folder directly, so anchoring
                 // Selection here is unnecessary and would cause the browser's own
                 // OnSelectionChange handler to push the folder into m_LastFolders
-                // and fire extra cascading state changes.
+                // and fire extra cascading state changes. The Assets menu's reveal
+                // entry reads that same folder (see ShowInExplorerMenu), so it does
+                // not need a selection to point at either.
                 host.MarkBrowserInteracted?.Invoke();
                 EditorUtility.DisplayPopupMenu(new Rect(e.mousePosition.x, e.mousePosition.y, 0, 0), "Assets/", null);
                 e.Use();

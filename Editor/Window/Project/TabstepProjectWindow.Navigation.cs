@@ -88,7 +88,7 @@ namespace Yozolab.Tabstep
             {
                 if (_session.ActiveTab?.CurrentPath != null)
                 {
-                    EditorGUIUtility.systemCopyBuffer = ToAbsolutePath(_session.ActiveTab.CurrentPath);
+                    EditorGUIUtility.systemCopyBuffer = FileBrowser.ToAbsolutePath(_session.ActiveTab.CurrentPath);
                     ShowNotification(new GUIContent("Absolute path copied"));
                 }
                 e.Use();

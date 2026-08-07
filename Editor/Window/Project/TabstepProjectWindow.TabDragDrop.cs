@@ -64,6 +64,15 @@ namespace Yozolab.Tabstep
         void ShowTabContextMenu(int index)
         {
             var menu = new GenericMenu();
+            // Top row: the OS file browser on this tab's own folder. The stock Assets
+            // menu's reveal acts on the current selection, which is not what a click on
+            // a tab means — and the tab clicked need not be the active one.
+            var tabPath = _session.Tabs[index].CurrentPath;
+            if (FileBrowser.FolderExists(tabPath))
+                menu.AddItem(new GUIContent(FileBrowser.OpenFolderLabel), false, () => OpenFolderOrNotify(tabPath));
+            else
+                menu.AddDisabledItem(new GUIContent(FileBrowser.OpenFolderLabel));
+            menu.AddSeparator("");
             menu.AddItem(new GUIContent("Close Tab"), false, () => CloseTab(index));
             if (_session.Count > 1)
                 menu.AddItem(new GUIContent("Close Other Tabs"), false, () =>
