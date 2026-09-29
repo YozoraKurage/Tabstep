@@ -206,6 +206,7 @@ namespace Yozolab.Tabstep
             _host = new ProjectBrowserHost(this);
             _columnHost = new AssetColumnView.Host
             {
+                Window = this,
                 OpenFolder = NavigateActiveTab,
                 OpenFolderInNewTab = OpenInNewTab,
                 Repaint = Repaint,
@@ -262,6 +263,7 @@ namespace Yozolab.Tabstep
 
             if (Event.current.type == EventType.Layout)
                 SyncWithBrowser();
+            AssetNameOverlay.TrackEvent(this);
             TrackDragState();
             HandleShortcuts();
             HandleMouseNavigation();
@@ -312,7 +314,23 @@ namespace Yozolab.Tabstep
                 // The navigation bar replaces the browser's path header (and, when the
                 // Harmony patches are active, its whole toolbar) — only while it's shown,
                 // so a path display and search always remain available.
-                _host.OnGUI(content, showNav);
+                //
+                // Items the browser paints during this pass may feed the hover-name popup
+                // (this is the only account of its layout we get). Not while the column view
+                // covers them though: the browser still paints its own rows under it, and a
+                // cursor over that hidden, differently ordered layout would feed a name from
+                // a row nobody can see. Ends in a finally because opening an asset from the
+                // browser leaves through GUIUtility.ExitGUI.
+                AssetNameOverlay.BeginBrowserItems(
+                    columns && listRect.Contains(Event.current.mousePosition) ? null : this);
+                try
+                {
+                    _host.OnGUI(content, showNav);
+                }
+                finally
+                {
+                    AssetNameOverlay.EndBrowserItems();
+                }
 
                 // Drawn after the browser so the type columns land on top of the list pane.
                 if (columns)
@@ -323,6 +341,8 @@ namespace Yozolab.Tabstep
             if (showStatus)
                 DrawStatusBar(new Rect(0, position.height - statusHeight, position.width, statusHeight));
             DrawPathSuggestions();
+            // Last, so the popup lands on top of every pane it may have to overlap.
+            AssetNameOverlay.EndPass(this);
         }
 
 

@@ -50,6 +50,11 @@ like the built-in Project window. On top of it, Tabstep adds:
   of selecting it inside its parent — with nothing selected it acts on the
   folder you are browsing rather than the project root. Applies to stock
   Project windows too; toggleable via the Reveal Opens Folders preference.
+- **Full name on hover** — resting the mouse on an item whose name the view had
+  to cut short spells the whole name out in a popup beside the cursor, so a
+  folder full of near-identically named prefabs can be read without selecting or
+  renaming anything. Covers the icon grid, the list and the folder tree alike;
+  toggleable via the Hover Shows Full Name preference.
 - **Status bar** — item count of the shown folder plus the selection's count
   and file size at the bottom (toggleable).
 - **Explorer-style address bar** — back/forward/up buttons, the folder icon and
@@ -155,7 +160,7 @@ Open via `YozoLab > Tabstep`.
 Preferences live under `Edit > Preferences > Yozolab > Tabstep`
 (new-tab folder, new-tab position, navigation bar, status bar, search filter
 chips, tab title length, middle-click close, mouse side buttons, ping
-behaviour, reveal opens folders, shelf one-shot).
+behaviour, hover shows full name, reveal opens folders, shelf one-shot).
 
 ## Harmony (optional but recommended)
 

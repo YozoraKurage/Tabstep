@@ -99,6 +99,16 @@ namespace Yozolab.Tabstep
         }
 
         /// <summary>
+        /// Spell out an asset name the view had to cut short in a popup beside the cursor
+        /// while the mouse rests on its row. See <see cref="AssetNameOverlay"/>.
+        /// </summary>
+        public static bool HoverShowsFullName
+        {
+            get => EditorPrefs.GetBool(Prefix + "HoverShowsFullName", true);
+            set => EditorPrefs.SetBool(Prefix + "HoverShowsFullName", value);
+        }
+
+        /// <summary>
         /// Replace Unity's "Show in Explorer" / "Reveal in Finder" entry in the Assets menu
         /// with one that opens a folder instead of selecting it inside its parent, and that
         /// falls back to the folder the Project window shows when nothing is selected.
@@ -117,7 +127,7 @@ namespace Yozolab.Tabstep
                 "NewTabFolder", "MiddleClickClosesTab", "ShowNavigationBar", "MaxTabTitleLength",
                 "PingOpensNewTab", "MouseSideButtonsNavigate", "NewTabBesideActive", "ShelfOneShot",
                 "ShowStatusBar", "ColumnViewFolderDrop", "EqualWidthTabs",
-                "ShowInExplorerOpensFolders",
+                "ShowInExplorerOpensFolders", "HoverShowsFullName",
             };
             foreach (var key in keys)
                 EditorPrefs.DeleteKey(Prefix + key);
@@ -141,6 +151,7 @@ namespace Yozolab.Tabstep
                     "project", "browser", "tab", "explorer", "breadcrumb", "history",
                     "inspector", "ping", "double click", "mouse", "side button", "path header",
                     "shelf", "pin", "quick access", "bookmark", "reorder", "selection",
+                    "hover", "tooltip", "name",
                 }),
             };
         }
@@ -186,6 +197,12 @@ namespace Yozolab.Tabstep
                     "A bottom row showing the current folder's item count and a summary of " +
                     "the selected assets (count and file size)."),
                 TabstepSettings.ShowStatusBar);
+            TabstepSettings.HoverShowsFullName = EditorGUILayout.Toggle(
+                new GUIContent("Hover Shows Full Name",
+                    "Resting the mouse on an item whose name was cut short spells the whole " +
+                    "name out in a popup beside the cursor. Works in both the stock list " +
+                    "(icons, list and folder tree) and the type-column view."),
+                TabstepSettings.HoverShowsFullName);
             EditorGUI.indentLevel--;
 
             EditorGUILayout.Space(8);

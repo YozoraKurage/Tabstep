@@ -78,6 +78,7 @@ namespace Yozolab.Tabstep
         /// <summary>Callbacks into the owning window — navigation and repaint.</summary>
         public struct Host
         {
+            public EditorWindow Window;                // the owning window, for window-wide overlays
             public Action<string> OpenFolder;          // double-click a folder column entry
             public Action<string> OpenFolderInNewTab;  // middle-click a folder column entry
             public Action Repaint;
@@ -341,66 +342,9 @@ namespace Yozolab.Tabstep
                     // at that spot in its own (hidden, differently ordered) layout, which
                     // switches the Inspector to the wrong object. Swallow the drag here so only
                     // real drop targets elsewhere (scene, object fields, the folder tree) act.
-                    //
-                    // Drops over a specific folder entry (opt-in) target that folder; otherwise
-                    // the shown folder itself, the natural target after a spring-load brought us
-                    // to a sibling tab. Scene GameObjects in the drag become brand-new prefabs
-                    // there (Copy mode), matching the stock browser's Hierarchy → Project drop.
                     if (listRect.Contains(e.mousePosition))
                     {
-                        string hoveredFolder = null;
-                        if (TabstepSettings.ColumnViewFolderDrop)
-                        {
-                            var hit = HitTest(e.mousePosition, lay, out bool isFolder);
-                            if (isFolder) hoveredFolder = hit;
-                        }
-                        string dropTo = hoveredFolder ?? folder;
-                        var sceneRoots = CollectSceneRootsForPrefab();
-                        // A drag from outside the project (Finder/Explorer, a .unitypackage
-                        // double-click-and-drag) never touched the AssetDatabase, so it carries
-                        // OS paths but no object references — unlike a drag of existing project
-                        // assets, which always populates objectReferences too. Without this
-                        // check those OS paths fell into CollectDraggedAssetPaths/
-                        // HasMoveableAssetInto below, which — having no notion of "not a project
-                        // asset yet" — happily called AssetDatabase.MoveAsset on a source path it
-                        // can never find, silently swallowing the drop instead of importing it.
-                        bool isExternalFileDrag = sceneRoots.Count == 0
-                            && DragAndDrop.objectReferences.Length == 0
-                            && DragAndDrop.paths.Length > 0;
-                        var draggedPaths = isExternalFileDrag ? null : CollectDraggedAssetPaths();
-                        bool willCreatePrefabs = sceneRoots.Count > 0
-                            && !string.IsNullOrEmpty(dropTo)
-                            && AssetDatabase.IsValidFolder(dropTo);
-                        bool willImportExternal = !willCreatePrefabs && isExternalFileDrag
-                            && !string.IsNullOrEmpty(dropTo) && AssetDatabase.IsValidFolder(dropTo);
-                        bool willMoveAssets = !willCreatePrefabs && !willImportExternal
-                            && HasMoveableAssetInto(dropTo, draggedPaths);
-                        if (willCreatePrefabs || willImportExternal || willMoveAssets)
-                        {
-                            DragAndDrop.visualMode = willMoveAssets
-                                ? DragAndDropVisualMode.Move
-                                : DragAndDropVisualMode.Copy;
-                            if (e.type == EventType.DragPerform)
-                            {
-                                DragAndDrop.AcceptDrag();
-                                if (willCreatePrefabs) CreatePrefabsInto(dropTo, sceneRoots);
-                                else if (willImportExternal) ImportExternalFilesInto(dropTo, DragAndDrop.paths);
-                                else MoveAssetsInto(dropTo, draggedPaths);
-                                _dropFolder = null;
-                            }
-                            else
-                            {
-                                // Highlight only the explicit folder row, never the bare
-                                // viewport — the latter would feel like the whole pane is
-                                // selected as a target.
-                                _dropFolder = hoveredFolder;
-                            }
-                        }
-                        else
-                        {
-                            DragAndDrop.visualMode = DragAndDropVisualMode.None;
-                            _dropFolder = null;
-                        }
+                        HandleDrop(e, lay, folder);
                         host.Repaint?.Invoke();
                         e.Use();
                     }
@@ -617,6 +561,10 @@ namespace Yozolab.Tabstep
 
             var labelRect = new Rect(iconRect.xMax + 4, r.y, r.xMax - iconRect.xMax - 6, r.height);
             GUI.Label(labelRect, item.Name, isSelected ? RowSelStyle : RowStyle);
+
+            // A name too long for its column ends in "..." here; hovering it spells it out.
+            if (item.Path == _hoverPath)
+                AssetNameOverlay.Offer(_lastHost.Window, item.Name, labelRect.width, RowStyle);
 
             if (isPing) DrawBorder(r, new Color(PingColor.r, PingColor.g, PingColor.b, _pingAlpha));
         }
@@ -1494,6 +1442,134 @@ namespace Yozolab.Tabstep
         }
 
         /// <summary>
+        /// A drag over the covered list pane. Drops onto a specific folder entry (opt-in)
+        /// target that folder; otherwise the shown folder itself — the natural target after a
+        /// spring-load brought us to a sibling tab.
+        ///
+        /// Apart from a dropped .unitypackage, which goes straight to the import dialog, the
+        /// drop is Unity's own (<see cref="ProjectBrowserDrop"/>): the pane accepts exactly
+        /// what the stock list accepts, and in the same way — assets move, files dragged in
+        /// from Finder/Explorer are imported, scene objects are saved out as new prefabs, and
+        /// drop handlers other packages registered still run. Only when that internal entry
+        /// point is gone does <see cref="FallbackDrop"/> stand in with the subset we can
+        /// manage ourselves.
+        /// </summary>
+        void HandleDrop(Event e, Layout lay, string folder)
+        {
+            string hoveredFolder = null;
+            if (TabstepSettings.ColumnViewFolderDrop)
+            {
+                var hit = HitTest(e.mousePosition, lay, out bool isFolder);
+                if (isFolder) hoveredFolder = hit;
+            }
+            string dropTo = hoveredFolder ?? folder;
+            bool perform = e.type == EventType.DragPerform;
+
+            // A .unitypackage is the one drop not handed over blindly. It carries its own
+            // destination paths, so the folder it landed on is beside the point — what it
+            // wants is the import dialog, which is what a double-click and a drop on a stock
+            // Project window both get you. Leaving it to the drop below would make that
+            // depend on the Unity version's own reading of a dropped package.
+            var packages = DraggedPackagePaths();
+            if (packages != null)
+            {
+                DragAndDrop.visualMode = DragAndDropVisualMode.Copy;
+                _dropFolder = null; // no folder to highlight: the package chooses its own
+                if (perform)
+                {
+                    DragAndDrop.AcceptDrag();
+                    ImportPackagesLater(packages);
+                }
+                return;
+            }
+
+            if (!ProjectBrowserDrop.TryDrop(dropTo, perform, out var mode))
+                mode = FallbackDrop(dropTo, perform);
+            DragAndDrop.visualMode = mode;
+
+            bool accepted = mode != DragAndDropVisualMode.None &&
+                            mode != DragAndDropVisualMode.Rejected;
+            if (perform)
+            {
+                if (accepted) DragAndDrop.AcceptDrag();
+                _dropFolder = null;
+            }
+            else
+            {
+                // Highlight only the explicit folder row, never the bare viewport — the
+                // latter would feel like the whole pane is selected as a target.
+                _dropFolder = accepted ? hoveredFolder : null;
+            }
+        }
+
+        /// <summary>
+        /// The dragged <c>.unitypackage</c> files when the drag is nothing but packages from
+        /// outside the project; null otherwise. An in-project drag (which always carries
+        /// object references) is a move, and a mixed bag of files is left to Unity rather
+        /// than half-claimed here.
+        /// </summary>
+        static string[] DraggedPackagePaths()
+        {
+            if (DragAndDrop.objectReferences.Length > 0) return null;
+            var paths = DragAndDrop.paths;
+            if (paths == null || paths.Length == 0) return null;
+            foreach (var path in paths)
+                if (!IsPackageFile(path)) return null;
+            return paths;
+        }
+
+        static bool IsPackageFile(string path) =>
+            !string.IsNullOrEmpty(path) &&
+            string.Equals(Path.GetExtension(path), ".unitypackage", StringComparison.OrdinalIgnoreCase);
+
+        /// <summary>
+        /// Opens the import dialog for each package, off this event: the dialog must not come
+        /// up from inside the GUI pass of the drag that asked for it.
+        /// </summary>
+        static void ImportPackagesLater(string[] packages)
+        {
+            foreach (var path in packages)
+            {
+                var package = path; // captured per package, not per loop
+                EditorApplication.delayCall += () => AssetDatabase.ImportPackage(package, true);
+            }
+        }
+
+        /// <summary>
+        /// Stands in for <see cref="ProjectBrowserDrop"/> when Unity's internal drop cannot
+        /// be reached: moves project assets, copies files in from outside the project and
+        /// saves dragged scene objects out as prefabs — the part of the job managed code can
+        /// do on its own.
+        /// </summary>
+        static DragAndDropVisualMode FallbackDrop(string dropTo, bool perform)
+        {
+            if (string.IsNullOrEmpty(dropTo) || !AssetDatabase.IsValidFolder(dropTo))
+                return DragAndDropVisualMode.None;
+
+            var sceneRoots = CollectSceneRootsForPrefab();
+            if (sceneRoots.Count > 0)
+            {
+                // Matching the stock browser's Hierarchy → Project drop: brand-new prefabs.
+                if (perform) CreatePrefabsInto(dropTo, sceneRoots);
+                return DragAndDropVisualMode.Copy;
+            }
+            // A drag from outside the project (Finder/Explorer, a .unitypackage) never
+            // touched the AssetDatabase, so it carries OS paths but no object references —
+            // unlike a drag of existing project assets, which always populates
+            // objectReferences too. Without that distinction those OS paths reach
+            // AssetDatabase.MoveAsset, which can only fail on a source path it never knew.
+            if (DragAndDrop.objectReferences.Length == 0 && DragAndDrop.paths.Length > 0)
+            {
+                if (perform) ImportExternalFilesInto(dropTo, DragAndDrop.paths);
+                return DragAndDropVisualMode.Copy;
+            }
+            var draggedPaths = CollectDraggedAssetPaths();
+            if (!HasMoveableAssetInto(dropTo, draggedPaths)) return DragAndDropVisualMode.None;
+            if (perform) MoveAssetsInto(dropTo, draggedPaths);
+            return DragAndDropVisualMode.Move;
+        }
+
+        /// <summary>
         /// True when at least one path in <paramref name="paths"/> would actually move into
         /// <paramref name="folder"/> — i.e. it exists outside the folder and is not the
         /// folder itself. Used so the cursor only shows "Move" while a real drop would
@@ -1550,9 +1626,9 @@ namespace Yozolab.Tabstep
             foreach (var src in externalPaths)
             {
                 if (string.IsNullOrEmpty(src) || !File.Exists(src)) continue;
-                if (string.Equals(Path.GetExtension(src), ".unitypackage", StringComparison.OrdinalIgnoreCase))
+                if (IsPackageFile(src))
                 {
-                    AssetDatabase.ImportPackage(src, true);
+                    ImportPackagesLater(new[] { src });
                     continue;
                 }
                 string destPath = AssetDatabase.GenerateUniqueAssetPath(folder + "/" + Path.GetFileName(src));
