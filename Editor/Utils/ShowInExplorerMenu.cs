@@ -30,17 +30,19 @@ namespace Yozolab.Tabstep
     /// </summary>
     static class ShowInExplorerMenu
     {
-        // Platform-specific wording of the stock entry: Windows, macOS, Linux. Menu paths are
-        // the untranslated keys — localization happens where they are drawn — so this holds
-        // in a localized editor too. Checked against the running editor on Linux, where the
-        // entry really is called "Open Containing Folder" (2026-10-01); missing that name
-        // left Tabstep adding a second entry of its own there instead of rewiring Unity's.
-        static readonly string[] StockPaths =
-        {
-            "Assets/Show in Explorer",
-            "Assets/Reveal in Finder",
-            "Assets/Open Containing Folder",
-        };
+        // Where Unity's own entry lives, by platform. Menu paths are the untranslated keys —
+        // localization happens where they are drawn — so this holds in a localized editor
+        // too. All three names were read off a running editor: "Open Containing Folder" from
+        // this package's Linux dev container, "Show in Explorer" from a user's Windows editor
+        // (it comes back under that name as soon as the preference is switched off).
+        const string StockPath =
+#if UNITY_EDITOR_WIN
+            "Assets/Show in Explorer";
+#elif UNITY_EDITOR_OSX
+            "Assets/Reveal in Finder";
+#else
+            "Assets/Open Containing Folder";
+#endif
 
         // Used when the real priority cannot be read back; keeps the entry near Unity's own
         // reveal/open group rather than at the end of the menu.
@@ -117,35 +119,55 @@ namespace Yozolab.Tabstep
             var ours = "Assets/" + FileBrowser.OpenFolderLabel;
             try
             {
-                var stock = FindStockPath();
-                if (stock != null)
+                // Registered even while the preference is off: Unity's entry cannot be put
+                // back once removed, so ours has to stand in for it (see Reveal).
+                //
+                // Registered without first asking whether Unity's is there, too. On Windows
+                // its entry answers no to MenuItemExists and is absent from GetMenuItems, yet
+                // the menu shows it — and it goes away the moment anything else is added to
+                // the Assets menu (user's editor, 2026-10-02). Asking first meant Tabstep
+                // added a separate entry of its own on that platform and the real one
+                // vanished behind it; claiming the path outright leaves one entry, under the
+                // name the platform uses, doing what the preference says.
+                Register(StockPath, RegisterAt(StockPath), RevealAction);
+                SessionState.SetBool(ReplacedKey, true);
+                if (MenuItemExists(StockPath))
                 {
-                    // Registered even while the preference is off: Unity's entry cannot be put
-                    // back once removed, so ours has to stand in for it (see Reveal).
-                    Register(stock, ReplacementPriority(stock), RevealAction);
-                    if (MenuItemExists(stock))
-                    {
-                        // A stand-in from an earlier pass, before this entry showed up.
-                        if (MenuItemExists(ours)) RemoveMenuItem(ours);
-                        SessionState.SetBool(ReplacedKey, true);
-                        return;
-                    }
-                    // Removed but not re-registered: the menu would be left without the entry
-                    // altogether, and Unity's cannot be put back. Say so, and stand in.
-                    Debug.LogWarning($"[Tabstep] Unity's \"{stock}\" entry could not be " +
-                                     $"re-registered; \"{ours}\" stands in for it.");
+                    // A stand-in an older build of Tabstep added beside it.
+                    if (ours != StockPath && MenuItemExists(ours)) RemoveMenuItem(ours);
+                    return;
                 }
-                // No stock entry to rewire — Tabstep contributes its own, at the head of the
-                // menu's first group, where Unity's reveal entry lives and the hand looks for
-                // it. This one is ours, so switching the preference off can drop it outright.
+                // Not registered and not visible: the menu would be left without the entry
+                // altogether, and Unity's cannot be put back. Say so, and stand in under our
+                // own name — which is at least a name we know the menu accepts.
+                Debug.LogWarning($"[Tabstep] The \"{StockPath}\" entry could not be " +
+                                 $"registered; \"{ours}\" stands in for it.");
                 if (wanted) Register(ours, TopGroupPriority(ours), OpenShownFolderAction);
                 else RemoveMenuItem(ours);
-                SessionState.SetBool(ReplacedKey, wanted);
             }
             catch (Exception e)
             {
                 Debug.LogWarning($"[Tabstep] Could not adapt the file browser menu entry: {e}");
             }
+        }
+
+        /// <summary>
+        /// Priority to claim <paramref name="path"/> at: the one that keeps Unity's entry
+        /// where it was when the menu admits to having it, and the head of the menu's first
+        /// group — the same place, and the only one we can aim at — when it does not.
+        ///
+        /// Measured once per editor session and remembered. Measuring again would be
+        /// measuring our own work: the menu now reports the priority we gave the entry, and
+        /// each pass would subtract another one, walking it up the menu a place per domain
+        /// reload (19, 18, 17 ... — seen before this was stored).
+        /// </summary>
+        static int RegisterAt(string path)
+        {
+            int stored = SessionState.GetInt(PriorityKey, int.MinValue);
+            if (stored != int.MinValue) return stored;
+            int priority = MenuItemExists(path) ? RegisterPriority(path) : TopGroupPriority(path);
+            SessionState.SetInt(PriorityKey, priority);
+            return priority;
         }
 
         static bool MenuItemExists(string path)
@@ -162,15 +184,6 @@ namespace Yozolab.Tabstep
         {
             RemoveMenuItemMethod.Invoke(null, new object[] { path });
             AddMenuItemMethod.Invoke(null, new object[] { path, "", false, priority, action, null });
-        }
-
-        /// <summary>The stock entry's menu path, or null when this Unity has none of them.</summary>
-        static string FindStockPath()
-        {
-            foreach (var path in StockPaths)
-                // True for our own replacement as well, which is what a re-install needs.
-                if (MenuItemExists(path)) return path;
-            return null;
         }
 
         /// <summary>
@@ -262,23 +275,6 @@ namespace Yozolab.Tabstep
                 if (entry.Priority > first) return entry.Priority - 1;
             }
             return first == int.MinValue ? FallbackPriority : first; // a menu of one group
-        }
-
-        /// <summary>
-        /// Priority to register the replacement with. Measured once per editor session, while
-        /// the entry is still Unity's own: afterwards the menu reports the priority we gave
-        /// it, and measuring again would subtract another one on every pass.
-        /// </summary>
-        static int ReplacementPriority(string stock)
-        {
-            if (SessionState.GetBool(ReplacedKey, false))
-            {
-                int stored = SessionState.GetInt(PriorityKey, int.MinValue);
-                if (stored != int.MinValue) return stored;
-            }
-            int priority = RegisterPriority(stock);
-            SessionState.SetInt(PriorityKey, priority);
-            return priority;
         }
 
         /// <summary>An entry of the Assets menu itself rather than of one of its submenus.</summary>
