@@ -29,10 +29,17 @@ namespace Yozolab.Tabstep
     /// </summary>
     static class ShowInExplorerMenu
     {
-        // Platform-specific wording of the stock entry. Menu paths are the untranslated
-        // keys — localization happens where they are drawn — so this holds in a localized
-        // editor too.
-        static readonly string[] StockPaths = { "Assets/Show in Explorer", "Assets/Reveal in Finder" };
+        // Platform-specific wording of the stock entry: Windows, macOS, Linux. Menu paths are
+        // the untranslated keys — localization happens where they are drawn — so this holds
+        // in a localized editor too. Checked against the running editor on Linux, where the
+        // entry really is called "Open Containing Folder" (2026-10-01); missing that name
+        // left Tabstep adding a second entry of its own there instead of rewiring Unity's.
+        static readonly string[] StockPaths =
+        {
+            "Assets/Show in Explorer",
+            "Assets/Reveal in Finder",
+            "Assets/Open Containing Folder",
+        };
 
         // Used when the real priority cannot be read back; keeps the entry near Unity's own
         // reveal/open group rather than at the end of the menu.
@@ -88,7 +95,7 @@ namespace Yozolab.Tabstep
                 {
                     // Registered even while the preference is off: Unity's entry cannot be put
                     // back once removed, so ours has to stand in for it (see Reveal).
-                    Register(stock, StockPriority(stock), RevealAction);
+                    Register(stock, RegisterPriority(stock), RevealAction);
                     SessionState.SetBool(ReplacedKey, true);
                     return;
                 }
@@ -130,23 +137,49 @@ namespace Yozolab.Tabstep
             return null;
         }
 
-        /// <summary>Priority the entry currently sits at, so re-registering does not move it.</summary>
-        static int StockPriority(string path)
+        /// <summary>
+        /// Priority to re-register <paramref name="path"/> with, chosen so the entry stays
+        /// where it was.
+        ///
+        /// A menu is ordered by priority first and registration order second, so re-adding an
+        /// entry at its own priority drops it to the end of that whole priority run — and in
+        /// the Assets menu everything from "Open" to "Export Package..." shares priority 20,
+        /// which is most of the menu away from where the reveal entry belongs (measured in
+        /// the editor, 2026-10-01). One less puts it back: ahead of the run it used to open,
+        /// still behind whatever preceded it, and near enough that no extra separator appears
+        /// (Unity draws one at a gap of 11 or more).
+        ///
+        /// That is exact only for an entry that opened its priority run, which the reveal
+        /// entry does on every platform checked. One from the middle of a run cannot be
+        /// placed by priority alone; it keeps its own and lands at the end of the run.
+        /// </summary>
+        static int RegisterPriority(string path)
         {
             if (GetMenuItemsMethod == null) return FallbackPriority;
             try
             {
-                if (!(GetMenuItemsMethod.Invoke(null, new object[] { "Assets", false, false }) is Array items))
+                // Separators count: they are ordered like any other entry, and the one just
+                // before the reveal entry may well be a separator.
+                if (!(GetMenuItemsMethod.Invoke(null, new object[] { "Assets", true, false }) is Array items))
                     return FallbackPriority;
                 var itemType = items.GetType().GetElementType();
                 var pathProperty = itemType?.GetProperty("path");
                 var priorityProperty = itemType?.GetProperty("priority");
                 if (pathProperty == null || priorityProperty == null) return FallbackPriority;
+                int previous = int.MinValue;
                 foreach (var item in items)
                 {
-                    if ((string)pathProperty.GetValue(item) != path) continue;
+                    var itemPath = (string)pathProperty.GetValue(item);
                     var priority = (int)priorityProperty.GetValue(item);
-                    return priority >= 0 ? priority : FallbackPriority;
+                    if (itemPath != path)
+                    {
+                        // Submenu entries ("Assets/Import Package/Custom Package...") are in
+                        // this list too; they sit inside their parent and never precede it.
+                        if (IsTopLevel(itemPath)) previous = priority;
+                        continue;
+                    }
+                    if (priority < 0) return FallbackPriority;
+                    return previous < priority ? priority - 1 : priority;
                 }
             }
             catch
@@ -155,6 +188,9 @@ namespace Yozolab.Tabstep
             }
             return FallbackPriority;
         }
+
+        /// <summary>An entry of the Assets menu itself rather than of one of its submenus.</summary>
+        static bool IsTopLevel(string path) => path.Count(c => c == '/') <= 1;
 
         /// <summary>
         /// The rewired entry: a folder — or, with nothing selected, the folder the Project
