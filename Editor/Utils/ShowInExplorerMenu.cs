@@ -8,25 +8,24 @@ using UnityEngine;
 namespace Yozolab.Tabstep
 {
     /// <summary>
-    /// Rewires Unity's "Show in Explorer" / "Reveal in Finder" entry in the Assets menu so a
-    /// FOLDER opens with its contents shown instead of being selected inside its parent, and
-    /// so a right-click on empty space — where nothing is selected — targets the folder the
-    /// Project window is showing instead of the project root. Files keep Unity's behaviour:
-    /// their containing folder opens with the file selected.
+    /// Puts Tabstep's "Open Folder in Explorer" where Unity keeps its "Show in Explorer" /
+    /// "Reveal in Finder" entry, and takes that one away. The replacement opens the folder
+    /// the Project window is showing, with its contents in front of you and whatever is
+    /// selected left out of it — which is the thing Unity's entry could never do: it reveals
+    /// the selection, so a folder arrives selected inside its parent and an empty-space
+    /// right-click lands on the project root.
     ///
-    /// The stock entry is registered natively, so it can be neither patched nor extended:
-    /// it is removed and re-registered at the same path and priority through
-    /// UnityEditor.Menu's internal Add/RemoveMenuItem — the pair Unity itself uses to build
-    /// Window &gt; Layouts and to drop menu items belonging to excluded modules. That reaches
-    /// every Project window, stock or hosted by Tabstep, and the main Assets menu with it.
+    /// Unity's entry is registered natively and can be neither patched nor extended, so it
+    /// is removed and ours registered through UnityEditor.Menu's internal
+    /// Add/RemoveMenuItem — the pair Unity itself uses to build Window &gt; Layouts and to
+    /// drop menu items belonging to excluded modules. That reaches every Project window,
+    /// stock or hosted by Tabstep, and the main Assets menu with it. Tabstep's own windows
+    /// need it: the type-column view's context menu is Unity's stock Assets popup, which no
+    /// GenericMenu item of ours could be added to.
     ///
-    /// When the stock entry cannot be found (renamed in a future Unity) Tabstep registers
-    /// its own "Open Folder in ..." entry instead, so the type-column view's context menu —
-    /// Unity's stock Assets popup, which no GenericMenu item of ours could be added to —
-    /// always has a way to open the folder. Switched off in Preferences before anything was
-    /// installed, the menu is left untouched; an entry already replaced this session keeps
-    /// ours registered — Unity's cannot be put back short of an editor restart — and it then
-    /// behaves like the stock one again.
+    /// Switched off in Preferences before anything was installed, the menu is left
+    /// untouched. Switched off after the swap, ours stays and reveals the selection the way
+    /// Unity's did — Unity's cannot be put back short of an editor restart.
     /// </summary>
     static class ShowInExplorerMenu
     {
@@ -43,6 +42,9 @@ namespace Yozolab.Tabstep
 #else
             "Assets/Open Containing Folder";
 #endif
+
+        // Tabstep's entry, under the platform's own wording for the file browser.
+        static string OurPath => "Assets/" + FileBrowser.OpenFolderLabel;
 
         // Used when the real priority cannot be read back; keeps the entry near Unity's own
         // reveal/open group rather than at the end of the menu.
@@ -66,7 +68,6 @@ namespace Yozolab.Tabstep
             null, new[] { typeof(string), typeof(bool), typeof(bool) }, null);
 
         // Held in statics so the native menu can never call into a collected delegate.
-        static readonly Action RevealAction = Reveal;
         static readonly Action OpenShownFolderAction = OpenShownFolder;
 
         [InitializeOnLoadMethod]
@@ -116,34 +117,26 @@ namespace Yozolab.Tabstep
             if (!wanted && !SessionState.GetBool(ReplacedKey, false))
                 return; // opted out and nothing installed yet — leave the menu alone
             if (RemoveMenuItemMethod == null || AddMenuItemMethod == null) return;
-            var ours = "Assets/" + FileBrowser.OpenFolderLabel;
             try
             {
-                // Registered even while the preference is off: Unity's entry cannot be put
-                // back once removed, so ours has to stand in for it (see Reveal).
+                // Ours goes in at the place Unity's entry held — the position is measured
+                // first, while the entry is still Unity's — and Unity's comes out.
                 //
-                // Registered without first asking whether Unity's is there, too. On Windows
-                // its entry answers no to MenuItemExists and is absent from GetMenuItems, yet
-                // the menu shows it — and it goes away the moment anything else is added to
-                // the Assets menu (user's editor, 2026-10-02). Asking first meant Tabstep
-                // added a separate entry of its own on that platform and the real one
-                // vanished behind it; claiming the path outright leaves one entry, under the
-                // name the platform uses, doing what the preference says.
-                Register(StockPath, RegisterAt(StockPath), RevealAction);
+                // Measured without first asking whether it is there, too: on Windows Unity's
+                // entry answers no to MenuItemExists and is absent from GetMenuItems, yet the
+                // menu shows it, and it goes away the moment anything else is added to the
+                // Assets menu (user's editor, 2026-10-02). Asking first left Tabstep putting
+                // its entry at the end of the menu while the real one vanished behind it.
+                //
+                // Registered even while the preference is off: Unity's cannot be put back
+                // once removed, so ours stands in for it (see OpenShownFolder).
+                Register(OurPath, RegisterAt(StockPath), OpenShownFolderAction);
                 SessionState.SetBool(ReplacedKey, true);
-                if (MenuItemExists(StockPath))
-                {
-                    // A stand-in an older build of Tabstep added beside it.
-                    if (ours != StockPath && MenuItemExists(ours)) RemoveMenuItem(ours);
-                    return;
-                }
-                // Not registered and not visible: the menu would be left without the entry
-                // altogether, and Unity's cannot be put back. Say so, and stand in under our
-                // own name — which is at least a name we know the menu accepts.
-                Debug.LogWarning($"[Tabstep] The \"{StockPath}\" entry could not be " +
-                                 $"registered; \"{ours}\" stands in for it.");
-                if (wanted) Register(ours, TopGroupPriority(ours), OpenShownFolderAction);
-                else RemoveMenuItem(ours);
+                // Where the menu does admit to Unity's entry, it has to be taken out by name,
+                // or the two sit side by side saying nearly the same thing.
+                if (OurPath != StockPath && MenuItemExists(StockPath)) RemoveMenuItem(StockPath);
+                if (!MenuItemExists(OurPath))
+                    Debug.LogWarning($"[Tabstep] The \"{OurPath}\" entry could not be registered.");
             }
             catch (Exception e)
             {
@@ -281,31 +274,6 @@ namespace Yozolab.Tabstep
         static bool IsTopLevel(string path) => path.Count(c => c == '/') <= 1;
 
         /// <summary>
-        /// The rewired entry: a folder — or, with nothing selected, the folder the Project
-        /// window shows — opens; a file keeps Unity's reveal, which already opens its
-        /// containing folder with the file selected.
-        /// </summary>
-        static void Reveal()
-        {
-            if (!TabstepSettings.ShowInExplorerOpensFolders)
-            {
-                StockReveal();
-                return;
-            }
-            var selected = SelectedAssetPath();
-            if (selected != null && !AssetDatabase.IsValidFolder(selected))
-            {
-                EditorUtility.RevealInFinder(FileBrowser.ToAbsolutePath(selected));
-                return;
-            }
-            var folder = selected ?? ProjectBrowserHost.GetLastInteractedFolderPath();
-            if (FileBrowser.OpenFolder(folder)) return;
-            // Deleted meanwhile, or a virtual root such as "Packages" that has no folder of
-            // its own — let Unity point the file browser at whatever it can resolve.
-            EditorUtility.RevealInFinder(FileBrowser.ToAbsolutePath(folder ?? ProjectPaths.AssetsRoot));
-        }
-
-        /// <summary>
         /// What Unity's own entry did, for a preference switched off mid-session: reveal the
         /// selection, which for a folder means selecting it inside its parent.
         /// </summary>
@@ -315,10 +283,24 @@ namespace Yozolab.Tabstep
                 FileBrowser.ToAbsolutePath(SelectedAssetPath() ?? ProjectPaths.AssetsRoot));
         }
 
-        /// <summary>The fallback entry, which only ever opens the folder being browsed.</summary>
+        /// <summary>
+        /// The entry: the folder the Project window is showing, whatever happens to be
+        /// selected — the one thing Unity's own reveal could not do. With the preference off
+        /// it stands in for Unity's entry instead, which cannot be put back before a restart,
+        /// and reveals the selection the way that one did.
+        /// </summary>
         static void OpenShownFolder()
         {
-            FileBrowser.OpenFolder(ProjectBrowserHost.GetLastInteractedFolderPath());
+            if (!TabstepSettings.ShowInExplorerOpensFolders)
+            {
+                StockReveal();
+                return;
+            }
+            var folder = ProjectBrowserHost.GetLastInteractedFolderPath();
+            if (FileBrowser.OpenFolder(folder)) return;
+            // A virtual root such as "Packages", which has no folder of its own, or a folder
+            // deleted meanwhile — let Unity point the file browser at whatever it resolves.
+            EditorUtility.RevealInFinder(FileBrowser.ToAbsolutePath(folder ?? ProjectPaths.AssetsRoot));
         }
 
         /// <summary>Path of the asset the stock entry would act on, or null when none is selected.</summary>

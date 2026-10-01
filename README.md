@@ -45,11 +45,13 @@ like the built-in Project window. On top of it, Tabstep adds:
 - **Undo asset moves** — moved something onto the wrong tab? *Undo Last Asset
   Move* in the tab / path-bar context menus puts everything back.
 - **Open the folder in Explorer** — a tab's context menu opens that tab's
-  folder in the OS file browser, and Unity's own *Show in Explorer* /
-  *Reveal in Finder* is rewired to **open** a folder (contents shown) instead
-  of selecting it inside its parent — with nothing selected it acts on the
-  folder you are browsing rather than the project root. Applies to stock
-  Project windows too; toggleable via the Reveal Opens Folders preference.
+  folder in the OS file browser, and in the Assets menu *Open Folder in
+  Explorer* takes the place of Unity's *Show in Explorer* / *Reveal in
+  Finder*: it **opens** the folder you are browsing, contents in front of you,
+  whatever happens to be selected — where Unity's entry only ever revealed the
+  selection, leaving a folder selected inside its parent and an empty-space
+  right-click on the project root. Applies to stock Project windows too;
+  toggleable via the Replace Reveal Entry preference.
 - **Full name on hover** — resting the mouse on an item whose name the view had
   to cut short spells the whole name out in a popup beside the cursor, so a
   folder full of near-identically named prefabs can be read without selecting or
@@ -160,7 +162,7 @@ Open via `YozoLab > Tabstep`.
 Preferences live under `Edit > Preferences > Yozolab > Tabstep`
 (new-tab folder, new-tab position, navigation bar, status bar, search filter
 chips, tab title length, middle-click close, mouse side buttons, ping
-behaviour, hover shows full name, reveal opens folders, shelf one-shot).
+behaviour, hover shows full name, replace reveal entry, shelf one-shot).
 
 ## Harmony (optional but recommended)
 
