@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.Linq;
 using System.Reflection;
 using UnityEditor;
@@ -73,6 +74,28 @@ namespace Yozolab.Tabstep
             // be re-registered after every domain reload anyway: the path survives in the
             // native menu, the delegate behind it does not.
             EditorApplication.delayCall += Apply;
+            ScheduleRecheck();
+        }
+
+        // Not every entry of the Assets menu is in place by the first delayCall — other
+        // packages are still registering theirs, and Unity's own can arrive late too. One
+        // more pass a moment later picks up a reveal entry that was not there the first
+        // time, and drops the stand-in added in its absence.
+        const double RecheckDelay = 3.0;
+        static double _recheckAt;
+
+        static void ScheduleRecheck()
+        {
+            _recheckAt = EditorApplication.timeSinceStartup + RecheckDelay;
+            EditorApplication.update -= Recheck;
+            EditorApplication.update += Recheck;
+        }
+
+        static void Recheck()
+        {
+            if (EditorApplication.timeSinceStartup < _recheckAt) return;
+            EditorApplication.update -= Recheck;
+            Apply();
         }
 
         // Survives domain reloads but not an editor restart — exactly as long as the native
@@ -81,6 +104,9 @@ namespace Yozolab.Tabstep
         // preference is switched off; otherwise the menu would call a dead delegate.
         const string ReplacedKey = "Yozolab.Tabstep.RevealMenuReplaced";
 
+        // The priority the replacement went in with, kept beside it (see ReplacementPriority).
+        const string PriorityKey = "Yozolab.Tabstep.RevealMenuPriority";
+
         /// <summary>(Re)installs the entry. Also called when the preference is switched on.</summary>
         internal static void Apply()
         {
@@ -88,6 +114,7 @@ namespace Yozolab.Tabstep
             if (!wanted && !SessionState.GetBool(ReplacedKey, false))
                 return; // opted out and nothing installed yet — leave the menu alone
             if (RemoveMenuItemMethod == null || AddMenuItemMethod == null) return;
+            var ours = "Assets/" + FileBrowser.OpenFolderLabel;
             try
             {
                 var stock = FindStockPath();
@@ -95,22 +122,41 @@ namespace Yozolab.Tabstep
                 {
                     // Registered even while the preference is off: Unity's entry cannot be put
                     // back once removed, so ours has to stand in for it (see Reveal).
-                    Register(stock, RegisterPriority(stock), RevealAction);
-                    SessionState.SetBool(ReplacedKey, true);
-                    return;
+                    Register(stock, ReplacementPriority(stock), RevealAction);
+                    if (MenuItemExists(stock))
+                    {
+                        // A stand-in from an earlier pass, before this entry showed up.
+                        if (MenuItemExists(ours)) RemoveMenuItem(ours);
+                        SessionState.SetBool(ReplacedKey, true);
+                        return;
+                    }
+                    // Removed but not re-registered: the menu would be left without the entry
+                    // altogether, and Unity's cannot be put back. Say so, and stand in.
+                    Debug.LogWarning($"[Tabstep] Unity's \"{stock}\" entry could not be " +
+                                     $"re-registered; \"{ours}\" stands in for it.");
                 }
-                // No stock entry to rewire — Tabstep contributes its own. This one is ours,
-                // so switching the preference off can drop it outright.
-                var fallback = "Assets/" + FileBrowser.OpenFolderLabel;
-                if (wanted) Register(fallback, FallbackPriority, OpenShownFolderAction);
-                else RemoveMenuItemMethod.Invoke(null, new object[] { fallback });
+                // No stock entry to rewire — Tabstep contributes its own, at the head of the
+                // menu's first group, where Unity's reveal entry lives and the hand looks for
+                // it. This one is ours, so switching the preference off can drop it outright.
+                if (wanted) Register(ours, TopGroupPriority(ours), OpenShownFolderAction);
+                else RemoveMenuItem(ours);
                 SessionState.SetBool(ReplacedKey, wanted);
             }
             catch (Exception e)
             {
-                Debug.LogWarning($"[Tabstep] Could not adapt the \"Show in Explorer\" menu entry: {e}");
+                Debug.LogWarning($"[Tabstep] Could not adapt the file browser menu entry: {e}");
             }
         }
+
+        static bool MenuItemExists(string path)
+        {
+            if (MenuItemExistsMethod == null) return false;
+            try { return (bool)MenuItemExistsMethod.Invoke(null, new object[] { path }); }
+            catch { return false; }
+        }
+
+        static void RemoveMenuItem(string path) =>
+            RemoveMenuItemMethod.Invoke(null, new object[] { path });
 
         static void Register(string path, int priority, Action action)
         {
@@ -118,23 +164,46 @@ namespace Yozolab.Tabstep
             AddMenuItemMethod.Invoke(null, new object[] { path, "", false, priority, action, null });
         }
 
-        /// <summary>The stock entry's menu path, or null when this Unity has neither.</summary>
+        /// <summary>The stock entry's menu path, or null when this Unity has none of them.</summary>
         static string FindStockPath()
         {
-            if (MenuItemExistsMethod == null) return null;
             foreach (var path in StockPaths)
-            {
-                try
-                {
-                    // True for our own replacement as well, which is what a re-install needs.
-                    if ((bool)MenuItemExistsMethod.Invoke(null, new object[] { path })) return path;
-                }
-                catch
-                {
-                    return null;
-                }
-            }
+                // True for our own replacement as well, which is what a re-install needs.
+                if (MenuItemExists(path)) return path;
             return null;
+        }
+
+        /// <summary>
+        /// Top-level entries of the Assets menu in the order Unity keeps them, separators
+        /// included — they are ordered like any other entry, and the one just before the
+        /// reveal entry may well be one. Null when the internal lookup is gone.
+        /// </summary>
+        static List<(string Path, int Priority)> MenuEntries()
+        {
+            if (GetMenuItemsMethod == null) return null;
+            try
+            {
+                if (!(GetMenuItemsMethod.Invoke(null, new object[] { "Assets", true, false }) is Array items))
+                    return null;
+                var itemType = items.GetType().GetElementType();
+                var pathProperty = itemType?.GetProperty("path");
+                var priorityProperty = itemType?.GetProperty("priority");
+                if (pathProperty == null || priorityProperty == null) return null;
+                var entries = new List<(string, int)>();
+                foreach (var item in items)
+                {
+                    var path = (string)pathProperty.GetValue(item);
+                    // Submenu entries ("Assets/Import Package/Custom Package...") are in this
+                    // list too; they sit inside their parent and never precede it.
+                    if (!IsTopLevel(path)) continue;
+                    entries.Add((path, (int)priorityProperty.GetValue(item)));
+                }
+                return entries;
+            }
+            catch
+            {
+                return null;
+            }
         }
 
         /// <summary>
@@ -155,38 +224,61 @@ namespace Yozolab.Tabstep
         /// </summary>
         static int RegisterPriority(string path)
         {
-            if (GetMenuItemsMethod == null) return FallbackPriority;
-            try
+            var entries = MenuEntries();
+            if (entries == null) return FallbackPriority;
+            int previous = int.MinValue;
+            foreach (var entry in entries)
             {
-                // Separators count: they are ordered like any other entry, and the one just
-                // before the reveal entry may well be a separator.
-                if (!(GetMenuItemsMethod.Invoke(null, new object[] { "Assets", true, false }) is Array items))
-                    return FallbackPriority;
-                var itemType = items.GetType().GetElementType();
-                var pathProperty = itemType?.GetProperty("path");
-                var priorityProperty = itemType?.GetProperty("priority");
-                if (pathProperty == null || priorityProperty == null) return FallbackPriority;
-                int previous = int.MinValue;
-                foreach (var item in items)
+                if (entry.Path != path)
                 {
-                    var itemPath = (string)pathProperty.GetValue(item);
-                    var priority = (int)priorityProperty.GetValue(item);
-                    if (itemPath != path)
-                    {
-                        // Submenu entries ("Assets/Import Package/Custom Package...") are in
-                        // this list too; they sit inside their parent and never precede it.
-                        if (IsTopLevel(itemPath)) previous = priority;
-                        continue;
-                    }
-                    if (priority < 0) return FallbackPriority;
-                    return previous < priority ? priority - 1 : priority;
+                    previous = entry.Priority;
+                    continue;
                 }
-            }
-            catch
-            {
-                // Fall through to the default below.
+                if (entry.Priority < 0) return FallbackPriority;
+                return previous < entry.Priority ? entry.Priority - 1 : entry.Priority;
             }
             return FallbackPriority;
+        }
+
+        /// <summary>
+        /// Priority that puts an entry at the head of the menu's first real group — directly
+        /// under Create, which is where Unity's own reveal entry sits and where the hand goes
+        /// looking for it. One less than that group's, so it opens the group rather than
+        /// closing it, and close enough that Unity draws no separator around it.
+        ///
+        /// <paramref name="ignorePath"/> is the entry being placed: an earlier pass may have
+        /// put it there already, and measuring against it would subtract another one every
+        /// time, walking it up the menu a place per domain reload.
+        /// </summary>
+        static int TopGroupPriority(string ignorePath)
+        {
+            var entries = MenuEntries();
+            if (entries == null) return FallbackPriority;
+            int first = int.MinValue;
+            foreach (var entry in entries)
+            {
+                if (entry.Path == ignorePath) continue;
+                if (first == int.MinValue) { first = entry.Priority; continue; }
+                if (entry.Priority > first) return entry.Priority - 1;
+            }
+            return first == int.MinValue ? FallbackPriority : first; // a menu of one group
+        }
+
+        /// <summary>
+        /// Priority to register the replacement with. Measured once per editor session, while
+        /// the entry is still Unity's own: afterwards the menu reports the priority we gave
+        /// it, and measuring again would subtract another one on every pass.
+        /// </summary>
+        static int ReplacementPriority(string stock)
+        {
+            if (SessionState.GetBool(ReplacedKey, false))
+            {
+                int stored = SessionState.GetInt(PriorityKey, int.MinValue);
+                if (stored != int.MinValue) return stored;
+            }
+            int priority = RegisterPriority(stock);
+            SessionState.SetInt(PriorityKey, priority);
+            return priority;
         }
 
         /// <summary>An entry of the Assets menu itself rather than of one of its submenus.</summary>
